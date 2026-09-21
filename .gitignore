@@ -5,11 +5,11 @@ __pycache__/
 .ruff_cache/
 .env/
 .venv/
+models/*
+artifacts/*
 .vscode/
 *.egg-info/
-artifacts/
 data/
-models/
 results/
 **/*.aux
 **/*.bbl
