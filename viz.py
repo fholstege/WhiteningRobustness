@@ -43,6 +43,7 @@ from style import (
     PAPER_GREY,
     PAPER_ORANGE,
     PAPER_RED,
+    PLOT_LABEL_FONT_SIZE,
     TEXT_GREY,
     configure_plot_style,
     save_figure,
@@ -725,7 +726,7 @@ def make_figure(
         for axis in grid[0]:
             axis.set_ylim(0.0, 105.0)
             axis.set_yticks(np.arange(0, 101, 20))
-            axis.set_ylabel(axis.get_ylabel(), fontsize=17)
+            axis.set_ylabel(axis.get_ylabel(), fontsize=PLOT_LABEL_FONT_SIZE)
             axis.set_xticklabels([
                 _dataset_label(row)
                 for row in rows
@@ -734,7 +735,7 @@ def make_figure(
         for axis, panel_metric in zip(grid[1], (metric, "group_balanced_accuracy")):
             axis.set_xlabel(
                 f"Difference in {METRIC_LABELS[panel_metric].lower()} (%)",
-                fontsize=16,
+                fontsize=PLOT_LABEL_FONT_SIZE,
             )
         for axis in grid.flat:
             axis.tick_params(axis="y", labelsize=16)
@@ -811,7 +812,7 @@ def make_whitening_comparison_figure(
         for axis in grid[0]:
             axis.set_ylim(0, 105)
             axis.set_yticks(np.arange(0, 101, 20))
-            axis.set_ylabel(axis.get_ylabel(), fontsize=17)
+            axis.set_ylabel(axis.get_ylabel(), fontsize=PLOT_LABEL_FONT_SIZE)
             axis.set_xticklabels([
                 _dataset_label(row)
                 for row in rows
@@ -820,7 +821,7 @@ def make_whitening_comparison_figure(
         for axis, panel_metric in zip(grid[1], (metric, "group_balanced_accuracy")):
             axis.set_xlabel(
                 f"Difference in {METRIC_LABELS[panel_metric].lower()}",
-                fontsize=16,
+                fontsize=PLOT_LABEL_FONT_SIZE,
             )
             axis.tick_params(axis="x", labelsize=16)
         for axis in grid.flat:

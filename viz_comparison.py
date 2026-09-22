@@ -37,6 +37,7 @@ from style import (
     PAPER_GREEN,
     PAPER_GREY,
     PAPER_RED,
+    PLOT_LABEL_FONT_SIZE,
     TEXT_GREY,
     configure_plot_style,
     save_figure,
@@ -550,7 +551,7 @@ def make_figure(
     figure.supxlabel(
         f"Difference in {METRIC_LABELS[metric].lower()} (%)",
         y=0.125,
-        fontsize=16,
+        fontsize=PLOT_LABEL_FONT_SIZE,
     )
     
     bar_handles = [

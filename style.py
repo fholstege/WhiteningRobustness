@@ -18,7 +18,7 @@ TEXT_GREY = "#333333"
 
 # Shared manuscript type scale.  Figure 4 established these sizes; keeping
 # them here prevents individual plotting modules from quietly drifting apart.
-PLOT_LABEL_FONT_SIZE = 22
+PLOT_LABEL_FONT_SIZE = 21
 PLOT_TICK_FONT_SIZE = 19
 PLOT_LEGEND_FONT_SIZE = 17
 PLOT_ANNOTATION_FONT_SIZE = 16
