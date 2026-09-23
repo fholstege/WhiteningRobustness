@@ -38,7 +38,7 @@ from scipy import stats
 
 from data import EmbeddingBundle
 from evaluate import find_bundle
-from style import TEXT_GREY, configure_plot_style, save_figure
+from style import TEXT_GREY, PLOT_ANNOTATION_FONT_SIZE, configure_plot_style, save_figure
 from whitening import make_transform
 
 
@@ -453,7 +453,7 @@ def make_figure(
             f"{estimate.mean:.3f}",
             ha="center",
             va="bottom",
-            fontsize=15,
+            fontsize=PLOT_ANNOTATION_FONT_SIZE,
             color=TEXT_GREY,
         )
     figure.tight_layout()

@@ -49,7 +49,7 @@ from whitening import validate_whitening_estimator
 FINETUNE_RESULTS_CONFIG: dict[str, Any] = {
     "artifact_root": "artifacts/embeddings",
     "saved_head_root": "artifacts/last_layers",
-    "results_dir": "results_ws",
+    "results_dir": "results_check",
     "verify_hashes": True,
     "overwrite": False,
     "append": False,
@@ -744,6 +744,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         "--embedding",
         help="Run only the configured experiment with this embedding.",
     )
+    parser.add_argument(
+        "--results-dir",
+        help="Write all selected experiment sweeps under this directory.",
+    )
     write_mode = parser.add_mutually_exclusive_group()
     write_mode.add_argument(
         "--overwrite",
@@ -802,6 +806,8 @@ def resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         config["blas_threads"] = args.blas_threads
     if args.progress_every is not None:
         config["progress_every"] = args.progress_every
+    if args.results_dir is not None:
+        config["results_dir"] = args.results_dir
     if args.warm_start is not None:
         config["warm_start"] = args.warm_start
     if args.overwrite is not None:

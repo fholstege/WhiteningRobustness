@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 import matplotlib.pyplot as plt
+from matplotlib.text import Text
 
 
 PAPER_BLUE = "#4c78a8"
@@ -16,15 +17,25 @@ PAPER_PURPLE = "#9467bd"
 PAPER_GREY = "#777777"
 TEXT_GREY = "#333333"
 
-# Shared manuscript type scale.  Figure 4 established these sizes; keeping
-# them here prevents individual plotting modules from quietly drifting apart.
-PLOT_LABEL_FONT_SIZE = 21
-PLOT_TICK_FONT_SIZE = 19
-PLOT_LEGEND_FONT_SIZE = 17
-PLOT_ANNOTATION_FONT_SIZE = 16
+# Shared manuscript type scale for every figure and plotting module.
+PLOT_LABEL_FONT_SIZE = 16
+PLOT_TICK_FONT_SIZE = 12
+PLOT_LEGEND_FONT_SIZE = 13
+PLOT_TITLE_FONT_SIZE = 16
+# Comparison-panel headings are intentionally quieter than general figure titles.
+PLOT_COMPARISON_TITLE_FONT_SIZE = 12
+# Dataset names need to remain legible in the grouped manuscript comparisons.
+PLOT_DATASET_TICK_FONT_SIZE = 14
+PLOT_ANNOTATION_FONT_SIZE = 11
+PLOT_BAR_ANNOTATION_FONT_SIZE = 10
+PLOT_COMPARISON_BAR_ANNOTATION_FONT_SIZE = 9
+PLOT_RAYLEIGH_LABEL_FONT_SIZE = 18
+PLOT_BASE_FONT_SIZE = 11
+PAPER_FIGURE_WIDTH_INCHES = 11.2
+PLOT_EXPORT_DPI = 300
 
 METHOD_LABELS = {
-    "identity": "None",
+    "identity": "No preprocessing",
     "standardize": "Standardization",
     "whiten": "Whitening",
     "whiten_ledoit_wolf": "Whitening",
@@ -59,9 +70,11 @@ def configure_plot_style() -> None:
             "font.family": "serif",
             "font.serif": ["Times New Roman", "Times", "DejaVu Serif"],
             "mathtext.fontset": "stix",
-            "font.size": 11,
+            "font.size": PLOT_BASE_FONT_SIZE,
             "axes.labelsize": PLOT_LABEL_FONT_SIZE,
-            "axes.titlesize": 12,
+            "axes.titlesize": PLOT_TITLE_FONT_SIZE,
+            "figure.labelsize": PLOT_LABEL_FONT_SIZE,
+            "figure.titlesize": PLOT_TITLE_FONT_SIZE,
             "axes.titleweight": "regular",
             "axes.edgecolor": TEXT_GREY,
             "axes.labelcolor": TEXT_GREY,
@@ -81,7 +94,7 @@ def configure_plot_style() -> None:
             "lines.linewidth": 1.8,
             "lines.markersize": 5,
             "figure.dpi": 120,
-            "savefig.dpi": 300,
+            "savefig.dpi": PLOT_EXPORT_DPI,
             "savefig.bbox": "tight",
             "savefig.pad_inches": 0.05,
         }
@@ -123,6 +136,22 @@ def save_figure(
             "Pass --overwrite to replace them."
         )
     stem.parent.mkdir(parents=True, exist_ok=True)
+    # The manuscript includes each tightly cropped image at \textwidth. Use
+    # the exported width, including padding, to preserve printed font sizes.
+    if not getattr(figure, "_paper_text_scaled", False):
+        artists = figure.findobj(match=Text)
+        original_sizes = [artist.get_fontsize() for artist in artists]
+        padding = float(plt.rcParams["savefig.pad_inches"])
+        for _ in range(3):
+            figure.canvas.draw()
+            export_width = (
+                figure.get_tightbbox(figure.canvas.get_renderer()).width
+                + 2.0 * padding
+            )
+            scale = export_width / PAPER_FIGURE_WIDTH_INCHES
+            for artist, original_size in zip(artists, original_sizes):
+                artist.set_fontsize(original_size * scale)
+        figure._paper_text_scaled = True
     for path in paths:
         figure.savefig(path)
     return paths

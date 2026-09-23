@@ -50,8 +50,8 @@ COMPARISON_METHOD_REGISTRY: dict[str, Callable[..., list[dict[str, Any]]]] = {
 
 
 COMPARISON_CONFIG: dict[str, Any] = {
-    # Binary fits use liblinear and multiclass fits use L-BFGS. DFR balances by
-    # group sampling; AFR uses adaptation weights.
+    # Ordinary binary and multiclass fits use the solvers fixed in model.py.
+    # DFR balances by group sampling; AFR uses adaptation weights.
     "artifact_root": FINETUNE_RESULTS_CONFIG["artifact_root"],
     "saved_head_root": "artifacts/last_layers",
     "results_dir": "results_paper/comparisons",
@@ -64,7 +64,7 @@ COMPARISON_CONFIG: dict[str, Any] = {
     # complete threshold-by-transform-by-ridge grid.
     "progress_every": 1,
     "unseeded_split_seed": 0,
-    "methods": ["NeuroTune"],
+    "methods": ["HO_ERM"],
     "sweep_defaults": {
         **copy.deepcopy(FINETUNE_RESULTS_CONFIG["sweep_defaults"]),
         "dfr_subsamples": 10,
@@ -102,25 +102,42 @@ COMPARISON_CONFIG: dict[str, Any] = {
     # each entry's class_balanced value for its ordinary retrained head; the
     # other comparison methods define their own balancing protocol.
     "experiments": [
-        # {
-        #     "dataset": "WB",
-        #     "embedding": "resnet50",
-        #     "seeds": list(range(1, 11)),
-        #     "class_balanced": True,
-        # },
-        # {
-        #     "dataset": "CelebA",
-        #     "embedding": "resnet50",
-        #     "seeds": list(range(1, 11)),
-        #     "class_balanced": True,
-        # },
+        {
+            "dataset": "WB",
+            "embedding": "resnet50",
+            "seeds": list(range(1, 11)),
+            "class_balanced": True,
+        },
+        {
+             "dataset": "WB",
+             "embedding": "dino_vitb16",
+             "seeds": [1, 2, 3, 4, 5],
+             "class_balanced": True,
+         },
+        {
+            "dataset": "CelebA",
+            "embedding": "resnet50",
+            "seeds": list(range(1, 11)),
+            "class_balanced": True,
+        },
+        {
+             "dataset": "CelebA",
+             "embedding": "dino_vitb16",
+             "seeds": [1, 2, 3, 4, 5],
+             "class_balanced": True,
+         },
         {
             "dataset": "multiNLI",
             "embedding": "BERT",
             "seeds": [1, 2, 3, 4, 5],
             "class_balanced": False,
         },
-        
+        {
+             "dataset": "multiNLI",
+             "embedding": "debertav3",
+             "seeds": [1, 2, 3],
+             "class_balanced": False,
+         }
     ],
 }
 
@@ -655,6 +672,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--blas-threads", type=int)
     parser.add_argument("--progress-every", type=int)
     parser.add_argument("--unseeded-split-seed", type=int)
+    parser.add_argument(
+        "--results-dir",
+        help="Write all selected comparison sweeps under this directory.",
+    )
     parser.add_argument("--overwrite", action="store_true", default=None)
     parser.add_argument(
         "--warm-start",
@@ -678,6 +699,7 @@ def resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "blas_threads",
         "progress_every",
         "unseeded_split_seed",
+        "results_dir",
         "overwrite",
         "warm_start",
     ):

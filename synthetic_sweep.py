@@ -547,7 +547,7 @@ def _configured_value_count(value: Any) -> int:
 
 
 def _plot_split_payload(data: Any, max_points: int) -> dict[str, Any]:
-    """Store a compact, deterministic sample for first-two-coordinate plots."""
+    """Store a compact deterministic sample for the boundary panels."""
     count = min(int(max_points), int(data.X.shape[0]))
     indices = np.arange(count, dtype=np.int64)
     return {
@@ -558,6 +558,13 @@ def _plot_split_payload(data: Any, max_points: int) -> dict[str, Any]:
         "labels": np.asarray(data.y[indices], dtype=np.int64).tolist(),
         "groups": np.asarray(data.groups[indices], dtype=np.int64).tolist(),
     }
+
+
+def _sampled_full_predictions(
+    X: np.ndarray, coefficients: np.ndarray, intercept: float
+) -> list[bool]:
+    """Predict with every original coordinate for the sampled test rows."""
+    return (np.asarray(X, dtype=np.float64) @ coefficients + intercept >= 0.0).tolist()
 
 
 def _theorem2_diagnostics(
@@ -835,6 +842,11 @@ def _evaluate_method(
             "intercept": np.asarray(intercept, dtype=np.float64).tolist(),
         },
     }
+    if data_config.seed == int(config["base_seed"]) + int(config["plot_sample_simulation"]):
+        count = min(int(config["plot_sample_size"]), int(test.X.shape[0]))
+        result["boundary_sample_predictions"] = _sampled_full_predictions(
+            test.X[:count], flat, float(np.asarray(intercept).reshape(-1)[0])
+        )
     if config["run_theory_checks"]:
         theorem2 = _theorem2_diagnostics(
             train=train,
@@ -1329,6 +1341,10 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Run only the main performance sweep, without theory validation.",
     )
     parser.add_argument(
+        "--run-theory-checks", action="store_true",
+        help="Run the configured Theorem 2 and Proposition 2 validation sweeps.",
+    )
+    parser.add_argument(
         "--ridge-lambda",
         type=float,
         help=(
@@ -1402,6 +1418,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         config["gamma_values"] = args.gammas
     if args.skip_theory_checks:
         config["run_theory_checks"] = False
+    if args.run_theory_checks:
+        if args.skip_theory_checks or args.gammas is not None:
+            raise ValueError("Theory checks require one gamma and cannot be skipped.")
+        config["run_theory_checks"] = True
+        config.pop("gamma_values", None)
     if args.ridge_lambda is not None:
         config["ridge_lambda"] = args.ridge_lambda
     if args.sklearn_C is not None:

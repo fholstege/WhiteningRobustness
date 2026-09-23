@@ -43,9 +43,15 @@ from style import (
     PAPER_GREY,
     PAPER_ORANGE,
     PAPER_RED,
+    PLOT_DATASET_TICK_FONT_SIZE,
     PLOT_LABEL_FONT_SIZE,
+    PLOT_TICK_FONT_SIZE,
+    PLOT_LEGEND_FONT_SIZE,
+    PLOT_ANNOTATION_FONT_SIZE,
+    PLOT_BAR_ANNOTATION_FONT_SIZE,
     TEXT_GREY,
     configure_plot_style,
+    method_label,
     save_figure,
 )
 
@@ -54,8 +60,9 @@ ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTPUT_DIR = ROOT / "plots"
 DEFAULT_METRIC = "worst_group_accuracy"
 DEFAULT_CONFIDENCE = 0.95
-VALUE_ANNOTATION_FONT_SIZE = 12
-EMPIRICAL_LEGEND_FONT_SIZE = 14
+VALUE_ANNOTATION_FONT_SIZE = PLOT_ANNOTATION_FONT_SIZE
+BAR_VALUE_ANNOTATION_FONT_SIZE = PLOT_BAR_ANNOTATION_FONT_SIZE
+EMPIRICAL_LEGEND_FONT_SIZE = PLOT_LEGEND_FONT_SIZE
 HSPACE_DIFF = 0.15
 HSPACE_LEGEND = -0.05
 METHODS = ("identity", "standardize", "whiten")
@@ -112,11 +119,7 @@ FIGURE_SWEEPS: Mapping[str, tuple[str, ...]] = {
     ),
 }
 
-METHOD_LABELS = {
-    "identity": "None",
-    "standardize": "Standardization",
-    "whiten": "Whitening",
-}
+METHOD_LABELS = {method: method_label(method) for method in METHODS}
 METHOD_COLORS = {
     "identity": PAPER_BLUE,
     "standardize": PAPER_GREEN,
@@ -559,7 +562,7 @@ def _whitening_label(whitening_method: str) -> str:
 
 def _contrast_label(baseline: str) -> str:
     if baseline == "identity":
-        return "Whitening − None"
+        return f"Whitening − {method_label(baseline)}"
     if baseline == "standardize":
         return "Whitening − Standardization"
     raise ValueError(f"Unknown contrast baseline {baseline!r}.")
@@ -607,7 +610,7 @@ def _draw_mean_panel(
                 f"{mean:.1f}",
                 ha="center",
                 va="bottom",
-                fontsize=VALUE_ANNOTATION_FONT_SIZE,
+                fontsize=BAR_VALUE_ANNOTATION_FONT_SIZE,
                 color=TEXT_GREY,
                 zorder=4,
             )
@@ -618,7 +621,9 @@ def _draw_mean_panel(
     ]
     axis.set_ylim(0.0, min(100.0, max(all_upper) + 10.0))
     axis.set_xticks(positions)
-    axis.set_xticklabels([_dataset_label(row) for row in rows])
+    axis.set_xticklabels(
+        [_dataset_label(row) for row in rows], fontsize=PLOT_DATASET_TICK_FONT_SIZE
+    )
     axis.set_ylabel(f"{METRIC_LABELS[metric]} (%)")
     axis.xaxis.grid(False)
 
@@ -675,7 +680,9 @@ def _draw_effect_panel(
     # The encoder is already printed below the matching bar group in panel (a).
     # Repeating only the dataset here keeps long appendix encoder names from
     # crowding the space between panels.
-    axis.set_yticklabels([_dataset_label(row) for row in rows])
+    axis.set_yticklabels(
+        [_dataset_label(row) for row in rows], fontsize=PLOT_DATASET_TICK_FONT_SIZE
+    )
     axis.set_xlabel(f"Difference in {METRIC_LABELS[metric].lower()} (%)")
     axis.yaxis.grid(False)
     axis.xaxis.grid(True)
@@ -730,7 +737,7 @@ def make_figure(
             axis.set_xticklabels([
                 _dataset_label(row)
                 for row in rows
-            ], fontsize=14)
+            ], fontsize=PLOT_DATASET_TICK_FONT_SIZE)
         grid[1, 1].tick_params(axis="y", labelleft=False)
         for axis, panel_metric in zip(grid[1], (metric, "group_balanced_accuracy")):
             axis.set_xlabel(
@@ -738,9 +745,9 @@ def make_figure(
                 fontsize=PLOT_LABEL_FONT_SIZE,
             )
         for axis in grid.flat:
-            axis.tick_params(axis="y", labelsize=16)
+            axis.tick_params(axis="y", labelsize=PLOT_TICK_FONT_SIZE)
         for axis in grid[1]:
-            axis.tick_params(axis="x", labelsize=16)
+            axis.tick_params(axis="x", labelsize=PLOT_TICK_FONT_SIZE)
     method_handles = [
         Patch(
             facecolor=METHOD_COLORS[method],
@@ -816,16 +823,16 @@ def make_whitening_comparison_figure(
             axis.set_xticklabels([
                 _dataset_label(row)
                 for row in rows
-            ], fontsize=14)
+            ], fontsize=PLOT_DATASET_TICK_FONT_SIZE)
         grid[1, 1].tick_params(axis="y", labelleft=False)
         for axis, panel_metric in zip(grid[1], (metric, "group_balanced_accuracy")):
             axis.set_xlabel(
                 f"Difference in {METRIC_LABELS[panel_metric].lower()}",
                 fontsize=PLOT_LABEL_FONT_SIZE,
             )
-            axis.tick_params(axis="x", labelsize=16)
+            axis.tick_params(axis="x", labelsize=PLOT_TICK_FONT_SIZE)
         for axis in grid.flat:
-            axis.tick_params(axis="y", labelsize=16)
+            axis.tick_params(axis="y", labelsize=PLOT_TICK_FONT_SIZE)
         return figure
     if axes is None:
         figure, axes = plt.subplots(1, 2, figsize=(11.2, 5.5),
@@ -870,7 +877,7 @@ def make_whitening_comparison_figure(
                 f"{mean:.1f}",
                 ha="center",
                 va="bottom",
-                fontsize=VALUE_ANNOTATION_FONT_SIZE,
+                fontsize=BAR_VALUE_ANNOTATION_FONT_SIZE,
                 color=TEXT_GREY,
                 zorder=4,
             )
@@ -881,7 +888,9 @@ def make_whitening_comparison_figure(
     ]
     axes[0].set_ylim(0.0, min(100.0, max(all_upper) + 10.0))
     axes[0].set_xticks(positions)
-    axes[0].set_xticklabels([_dataset_label(row) for row in rows])
+    axes[0].set_xticklabels(
+        [_dataset_label(row) for row in rows], fontsize=PLOT_DATASET_TICK_FONT_SIZE
+    )
     axes[0].set_ylabel(f"{METRIC_LABELS[metric]} (%)")
     axes[0].xaxis.grid(False)
 
@@ -926,7 +935,9 @@ def make_whitening_comparison_figure(
     )
     axes[1].set_ylim(-0.5, len(rows) - 0.5)
     axes[1].set_yticks(effect_positions)
-    axes[1].set_yticklabels([_dataset_label(row) for row in rows])
+    axes[1].set_yticklabels(
+        [_dataset_label(row) for row in rows], fontsize=PLOT_DATASET_TICK_FONT_SIZE
+    )
     axes[1].set_xlabel(f"Difference in {METRIC_LABELS[metric].lower()}")
     axes[1].yaxis.grid(False)
     axes[1].xaxis.grid(True)

@@ -35,6 +35,7 @@ from matplotlib.lines import Line2D
 from matplotlib.ticker import FormatStrFormatter, PercentFormatter
 import numpy as np
 from scipy.special import ndtr
+from threadpoolctl import threadpool_limits
 
 from style import (
     PAPER_BLUE,
@@ -44,6 +45,7 @@ from style import (
     PAPER_RED,
     PAPER_GREY,
     PLOT_LABEL_FONT_SIZE,
+    PLOT_TICK_FONT_SIZE,
     TEXT_GREY,
     configure_plot_style,
     method_label,
@@ -233,12 +235,15 @@ def _draw_boundary_panel(
     coordinates: np.ndarray,
     labels: np.ndarray,
     coefficient_summaries: np.ndarray,
+    point_predictions: np.ndarray,
     noise_coordinate_scale: float,
     x_limits: tuple[float, float],
     y_limits: tuple[float, float],
 ) -> None:
     if not np.isfinite(noise_coordinate_scale) or noise_coordinate_scale <= 0.0:
         raise ValueError("Decision-boundary noise coordinate scale must be positive.")
+    if point_predictions.shape != labels.shape:
+        raise ValueError("Full-model boundary predictions do not match sampled labels.")
     if np.all(np.abs(coefficient_summaries[:, :2]) <= 1e-12):
         raise ValueError("The first two decision-boundary coefficients are zero.")
 
@@ -274,17 +279,7 @@ def _draw_boundary_panel(
         zorder=0,
     )
 
-    point_linear_score = (
-        coefficient_summaries[:, 0, None] * coordinates[None, :, 0]
-        + coefficient_summaries[:, 1, None] * coordinates[None, :, 1]
-        + coefficient_summaries[:, 2, None]
-    )
-    point_probability = ndtr(
-        point_linear_score
-        / (noise_coordinate_scale * coefficient_summaries[:, 3, None])
-    ).mean(axis=0)
-    predicted = point_probability >= 0.5
-    point_colors = np.where(predicted, PAPER_RED, PAPER_BLUE)
+    point_colors = np.where(point_predictions, PAPER_RED, PAPER_BLUE)
     for label, marker in ((0, "o"), (1, "s")):
         mask = labels == label
         axis.scatter(
@@ -316,14 +311,44 @@ def plot_decision_boundaries(
         report, condition_id=condition_id, simulation=simulation
     )
     payload = sample["test"]
-    coordinates = np.asarray(
+    display_coordinates = np.asarray(
         payload["first_two_coordinates"], dtype=np.float64
     )
+    selected_rows = {
+        str(row["method"]): row for row in report["results"]
+        if int(row["condition_id"]) == condition_id
+        and int(row["simulation"]) == simulation
+    }
+    if any(
+        "boundary_sample_predictions" not in selected_rows[method]
+        for method in (unwhitened_method, whitened_method)
+    ):
+        # Older sweep reports retained only two coordinates and coefficient
+        # norms. Refit this deterministic job to recover full-model predictions.
+        from synthetic_sweep import _run_sweep_job
+
+        condition = next(
+            item for item in report["conditions"]
+            if int(item["condition_id"]) == condition_id
+        )
+        with threadpool_limits(limits=1):
+            reconstructed = _run_sweep_job({
+                "config": dict(report["config"]),
+                "condition": condition,
+                "simulation": simulation,
+            })
+        reconstructed_payload = reconstructed["boundary_sample"]["test"]
+        selected_rows = {row["method"]: row for row in reconstructed["rows"]}
+        if not np.allclose(
+            np.asarray(reconstructed_payload["first_two_coordinates"]), display_coordinates,
+            rtol=1e-5, atol=1e-5,
+        ):
+            raise ValueError("Reconstructed boundary sample differs from the report.")
     labels = np.asarray(payload["labels"], dtype=np.int64)
-    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+    if display_coordinates.ndim != 2 or display_coordinates.shape[1] != 2:
         raise ValueError("Stored decision-boundary coordinates are malformed.")
-    lower = np.quantile(coordinates, 0.005, axis=0)
-    upper = np.quantile(coordinates, 0.995, axis=0)
+    lower = np.quantile(display_coordinates, 0.005, axis=0)
+    upper = np.quantile(display_coordinates, 0.995, axis=0)
     padding = np.maximum(0.08 * (upper - lower), 1e-6)
     x_limits = (float(lower[0] - padding[0]), float(upper[0] + padding[0]))
     y_limits = (float(lower[1] - padding[1]), float(upper[1] + padding[1]))
@@ -360,9 +385,12 @@ def plot_decision_boundaries(
         boundary_axis = axes[0, column_index]
         _draw_boundary_panel(
             boundary_axis,
-            coordinates=coordinates,
+            coordinates=display_coordinates,
             labels=labels,
             coefficient_summaries=_coefficient_summaries(method_rows),
+            point_predictions=np.asarray(
+                selected_rows[method]["boundary_sample_predictions"], dtype=bool
+            ),
             noise_coordinate_scale=noise_coordinate_scale,
             x_limits=x_limits,
             y_limits=y_limits,
@@ -514,7 +542,7 @@ def plot_performance(
     axes[1].xaxis.set_major_formatter(FormatStrFormatter("%.1f"))
     for axis in axes:
         for tick_label in axis.get_xticklabels():
-            tick_label.set_fontsize(13)
+            tick_label.set_fontsize(PLOT_TICK_FONT_SIZE)
             tick_label.set_rotation(45)
             tick_label.set_horizontalalignment("right")
             tick_label.set_rotation_mode("anchor")
@@ -525,7 +553,7 @@ def plot_performance(
     if upper <= lower:
         upper = lower + 0.05
     axes[0].set_ylim(lower, upper)
-    axes[0].legend(loc="lower left", fontsize=12)
+    axes[0].legend(loc="lower left")
 
     if standalone:
         figure.tight_layout()
@@ -641,7 +669,7 @@ def plot_performance_by_sample_size(
         tick_label.set_rotation(45)
         tick_label.set_horizontalalignment("right")
         tick_label.set_rotation_mode("anchor")
-    axis.legend(loc="lower left", fontsize=12)
+    axis.legend(loc="lower left")
     figure.tight_layout()
     return figure
 

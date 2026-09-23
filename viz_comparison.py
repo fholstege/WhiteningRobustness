@@ -37,9 +37,16 @@ from style import (
     PAPER_GREEN,
     PAPER_GREY,
     PAPER_RED,
+    PLOT_COMPARISON_TITLE_FONT_SIZE,
+    PLOT_DATASET_TICK_FONT_SIZE,
     PLOT_LABEL_FONT_SIZE,
+    PLOT_TICK_FONT_SIZE,
+    PLOT_LEGEND_FONT_SIZE,
+    PLOT_ANNOTATION_FONT_SIZE,
+    PLOT_COMPARISON_BAR_ANNOTATION_FONT_SIZE,
     TEXT_GREY,
     configure_plot_style,
+    method_label,
     save_figure,
 )
 
@@ -49,18 +56,14 @@ DEFAULT_RESULTS_DIR = ROOT / "results_paper" / "comparisons"
 DEFAULT_OUTPUT = ROOT / "plots" / "comparison_worst_group_accuracy"
 DEFAULT_METRIC = "worst_group_accuracy"
 DEFAULT_CONFIDENCE = 0.95
-VALUE_ANNOTATION_FONT_SIZE = 12
-COMPARISON_ANNOTATTION_FONT_SIZE = 10
-BAR_VALUE_ANNOTATION_FONT_SIZE = 9
-COMPARISON_LEGEND_FONT_SIZE = 14
+VALUE_ANNOTATION_FONT_SIZE = PLOT_ANNOTATION_FONT_SIZE
+COMPARISON_ANNOTATTION_FONT_SIZE = PLOT_ANNOTATION_FONT_SIZE
+BAR_VALUE_ANNOTATION_FONT_SIZE = PLOT_COMPARISON_BAR_ANNOTATION_FONT_SIZE
+COMPARISON_LEGEND_FONT_SIZE = PLOT_LEGEND_FONT_SIZE
 HSPACE_DIFF = 0.15
 HSPACE_LEGEND = 0.0
 BAR_METHODS = ("identity", "standardize", "whiten")
-BAR_LABELS = {
-    "identity": "None",
-    "standardize": "Standardization",
-    "whiten": "Whitening",
-}
+BAR_LABELS = {method: method_label(method) for method in BAR_METHODS}
 BAR_COLORS = {
     "identity": PAPER_BLUE,
     "standardize": PAPER_GREEN,
@@ -78,8 +81,8 @@ METRIC_LABELS = {
 }
 BASELINES = ("identity", "standardize")
 BASELINE_LABELS = {
-    "identity": "Whitening − None",
-    "standardize": "Whitening − Standardization",
+    "identity": f"Whitening − {method_label('identity')}",
+    "standardize": f"Whitening − {method_label('standardize')}",
 }
 BASELINE_COLORS = {
     "identity": PAPER_BLUE,
@@ -481,11 +484,14 @@ def make_figure(
                     fontsize=BAR_VALUE_ANNOTATION_FONT_SIZE, color=TEXT_GREY,
                     zorder=4,
                 )
-        mean_axis.set_title(panel.method.label)
+        mean_axis.set_title(
+            panel.method.label, fontsize=PLOT_COMPARISON_TITLE_FONT_SIZE
+        )
         mean_axis.set_ylim(0.0, accuracy_top)
         mean_axis.set_xticks(positions_for_bars)
         mean_axis.set_xticklabels(
-            [dataset.label for dataset in DATASET_SPECS]
+            [dataset.label for dataset in DATASET_SPECS],
+            fontsize=PLOT_DATASET_TICK_FONT_SIZE,
         )
         mean_axis.xaxis.grid(False)
         if column == 0:
@@ -541,7 +547,8 @@ def make_figure(
         axis.set_ylim(-0.5, len(DATASET_SPECS) - 0.5)
         axis.set_yticks(positions)
         axis.set_yticklabels(
-            [dataset.label for dataset in DATASET_SPECS] if column == 0 else []
+            [dataset.label for dataset in DATASET_SPECS] if column == 0 else [],
+            fontsize=PLOT_DATASET_TICK_FONT_SIZE,
         )
         axis.yaxis.grid(False)
         axis.xaxis.grid(True)

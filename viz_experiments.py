@@ -59,17 +59,21 @@ from style import (
     PAPER_GREY,
     PAPER_RED,
     PLOT_ANNOTATION_FONT_SIZE,
+    PLOT_BAR_ANNOTATION_FONT_SIZE,
+    PLOT_COMPARISON_TITLE_FONT_SIZE,
     PLOT_LABEL_FONT_SIZE,
     PLOT_LEGEND_FONT_SIZE,
+    PLOT_RAYLEIGH_LABEL_FONT_SIZE,
     PLOT_TICK_FONT_SIZE,
     configure_plot_style,
+    method_label as display_method_label,
     save_figure,
 )
 from whitening import make_transform
 
 
 DATASET_ORDER = ("WB", "CelebA", "multiNLI")
-COMPARISON_ANNOTATION_FONT_SIZE = 12
+COMPARISON_ANNOTATION_FONT_SIZE = PLOT_ANNOTATION_FONT_SIZE
 DATASET_LABELS = {
     "WB": "Waterbirds",
     "CelebA": "CelebA",
@@ -161,7 +165,16 @@ COMPARISON_SWEEP_PATHS: Mapping[str, Mapping[str, str]] = {
         "multiNLI": "results_paper/comparisons/multiNLI_BERT_NEUROTUNE.json",
     },
 }
-COMPARISON_METHOD_LABELS = {"dfr": "DFR", "afr": "AFR", "neurotune": "NeuroTune"}
+COMPARISON_METHOD_LABELS = {"dfr": "DFR", "afr": "AFR", "neurotune": "NT"}
+
+
+def _rayleigh_ylabel(trace_division: bool) -> str:
+    denominator = (
+        r"\mathrm{tr}(\hat{\Sigma})" if trace_division else r"\hat{\lambda}_1"
+    )
+    return rf"$\mathrm{{rq}}(\mathbf{{w}})/{denominator}$"
+
+
 COMPARISON_PLOTTED_TRANSFORMS = (
     "identity",
     "standardize",
@@ -1697,7 +1710,7 @@ def _draw_simplicity(
             identity_values,
             identity_intervals,
             PAPER_BLUE,
-            "None",
+            display_method_label("identity"),
             ".2g" if trace_division else ".2f",
         ),
         (
@@ -1746,7 +1759,10 @@ def _draw_simplicity(
             label=label,
         )
         for bar, value, interval in zip(bars, values, intervals):
-            rotate_small_label = trace_division and value < 0.05
+            rotate_small_label = (
+                method_label in COMPARISON_METHOD_LABELS.values()
+                or (trace_division and value < 0.05)
+            )
             axis.text(
                 bar.get_x() + bar.get_width() / 2,
                 interval[1] + 0.012 * upper_limit,
@@ -1792,15 +1808,9 @@ def _draw_simplicity(
         [DATASET_LABELS[dataset] for dataset in dataset_order],
     )
     if show_ylabel:
-        denominator = (
-            r"\mathrm{tr}(\hat{\Sigma})\boldsymbol{w}^{T}\boldsymbol{w}"
-            if trace_division
-            else r"\hat{\lambda}_{1}\boldsymbol{w}^{T}\boldsymbol{w}"
-        )
         axis.set_ylabel(
-            r"$\frac{\boldsymbol{w}^{T}\hat{\Sigma}\boldsymbol{w}}"
-            rf"{{{denominator}}}$",
-            fontsize=PLOT_LABEL_FONT_SIZE,
+            _rayleigh_ylabel(trace_division),
+            fontsize=PLOT_RAYLEIGH_LABEL_FONT_SIZE,
         )
     axis.tick_params(axis="both", labelsize=PLOT_TICK_FONT_SIZE)
     axis.legend(
@@ -1839,6 +1849,7 @@ def make_figure(
         axes[1],
         summaries,
         include_random_direction=False,
+        annotation_font_size=PLOT_BAR_ANNOTATION_FONT_SIZE,
         trace_division=trace_division,
     )
     return figure
@@ -1923,17 +1934,11 @@ def make_frozen_figure(
         legend = axis.get_legend()
         if legend is not None:
             legend.remove()
-    denominator = (
-        r"\mathrm{tr}(\hat{\Sigma})\boldsymbol{w}^{T}\boldsymbol{w}"
-        if trace_division
-        else r"\hat{\lambda}_{1}\boldsymbol{w}^{T}\boldsymbol{w}"
-    )
     figure.supylabel(
-        r"$\frac{\boldsymbol{w}^{T}\hat{\Sigma}\boldsymbol{w}}"
-        rf"{{{denominator}}}$",
+        _rayleigh_ylabel(trace_division),
         x=0.005,
         y=0.605,
-        fontsize=PLOT_LABEL_FONT_SIZE,
+        fontsize=PLOT_RAYLEIGH_LABEL_FONT_SIZE,
     )
     axes[0].legend(
         loc="upper center",
@@ -1984,21 +1989,18 @@ def make_comparison_plot(
             trace_division=trace_division,
             y_upper_limit=shared_upper_limit,
         )
-        axis.set_title(COMPARISON_METHOD_LABELS[method], fontsize=PLOT_LABEL_FONT_SIZE)
+        axis.set_title(
+            COMPARISON_METHOD_LABELS[method],
+            fontsize=PLOT_COMPARISON_TITLE_FONT_SIZE,
+        )
         legend = axis.get_legend()
         if legend is not None:
             legend.remove()
-    denominator = (
-        r"\mathrm{tr}(\hat{\Sigma})\boldsymbol{w}^{T}\boldsymbol{w}"
-        if trace_division
-        else r"\hat{\lambda}_{1}\boldsymbol{w}^{T}\boldsymbol{w}"
-    )
     figure.supylabel(
-        r"$\frac{\boldsymbol{w}^{T}\hat{\Sigma}\boldsymbol{w}}"
-        rf"{{{denominator}}}$",
+        _rayleigh_ylabel(trace_division),
         x=0.002,
         y=0.605,
-        fontsize=PLOT_LABEL_FONT_SIZE,
+        fontsize=PLOT_RAYLEIGH_LABEL_FONT_SIZE,
     )
     axes[0].legend(
         loc="upper center",

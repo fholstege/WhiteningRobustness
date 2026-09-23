@@ -47,6 +47,7 @@ py-modules = [
     "synthetic_sweep",
     "viz",
     "viz_comparison",
+    "viz_direction",
     "viz_synthetic",
     "whitening",
     "whitening_core",
