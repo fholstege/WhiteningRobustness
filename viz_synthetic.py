@@ -490,7 +490,9 @@ def plot_performance(
             plotted_values.extend((mean - interval).tolist())
             plotted_values.extend((mean + interval).tolist())
             style = method_style(method)
-            label = method_label(method)
+            label = (
+                "Empirical whitening" if method == "whiten" else method_label(method)
+            )
             # Keep the synthetic-performance comparison aligned with the
             # manuscript palette: green standardization and red whitening.
             # This explicit pairing is needed because the shared style also
@@ -715,6 +717,7 @@ def _plot_coefficient_confirmation(
     diagnostic_key: str,
     condition_id: int | None,
     allow_main_fallback: bool,
+    exact_reference_only: bool = False,
     y_padding_fraction: float = THEOREM2_Y_PADDING_FRACTION,
 ) -> Any:
     """Plot coefficient convergence over n for a dedicated validation."""
@@ -745,9 +748,8 @@ def _plot_coefficient_confirmation(
         ("core", r"Core coefficient $\hat w_c$"),
         ("spurious", r"Spurious coefficient $\hat w_s$"),
         (
-            "noise_prediction_variance",
-            r"Noise contribution $\sigma_\epsilon^2"
-            r"\|\hat{\mathbf{w}}_\epsilon\|_2^2/q$",
+            "noise_squared_over_n",
+            r"Noise coefficient norm $\|\hat{\mathbf{w}}_\epsilon\|_2^2/n$",
         ),
     )
     figure, axes = plt.subplots(1, 3, figsize=(10.6, 3.25))
@@ -801,14 +803,6 @@ def _plot_coefficient_confirmation(
             limit_curve = []
             for x_value in x_grid:
                 condition_rows = grouped[float(x_value)]
-                observed = np.asarray(
-                    [
-                        _coefficient_metric(
-                            row, diagnostic_key, metric, "finite_sample"
-                        )
-                        for row in condition_rows
-                    ]
-                )
                 limits = np.asarray(
                     [
                         _coefficient_metric(row, diagnostic_key, metric, "limit")
@@ -819,7 +813,20 @@ def _plot_coefficient_confirmation(
                     raise ValueError(
                         "Theorem reference values vary within a condition."
                     )
-                average, interval = _mean_and_interval(observed)
+                if exact_reference_only:
+                    observed = np.asarray([float(limits[0])])
+                    average = float(limits[0])
+                    interval = 0.0
+                else:
+                    observed = np.asarray(
+                        [
+                            _coefficient_metric(
+                                row, diagnostic_key, metric, "finite_sample"
+                            )
+                            for row in condition_rows
+                        ]
+                    )
+                    average, interval = _mean_and_interval(observed)
                 observed_by_condition.append(observed)
                 averages.append(average)
                 intervals.append(interval)
@@ -832,35 +839,46 @@ def _plot_coefficient_confirmation(
             )
             jitter_width = 0.04 * minimum_gap
             color = colors[series_index]
-            for x_value, observed in zip(x_grid, observed_by_condition):
-                offsets = np.linspace(-jitter_width, jitter_width, observed.size)
-                axis.scatter(
-                    x_value + offsets,
-                    observed,
-                    s=10,
-                    color=color,
-                    alpha=0.18,
-                    edgecolors="none",
-                )
+            if not exact_reference_only:
+                for x_value, observed in zip(x_grid, observed_by_condition):
+                    offsets = np.linspace(-jitter_width, jitter_width, observed.size)
+                    axis.scatter(
+                        x_value + offsets,
+                        observed,
+                        s=10,
+                        color=color,
+                        alpha=0.18,
+                        edgecolors="none",
+                    )
             averages_array = np.asarray(averages)
             intervals_array = np.asarray(intervals)
             limit_array = np.asarray(limit_curve)
-            axis.plot(
-                x_grid,
-                limit_array,
-                color="#111111" if diagnostic_key == "theorem2" else color,
-                linestyle="--",
-            )
-            axis.errorbar(
-                x_grid,
-                averages_array,
-                yerr=intervals_array,
-                color=TEXT_GREY,
-                marker="o",
-                capsize=3,
-                linewidth=2.8,
-                zorder=4,
-            )
+            if exact_reference_only:
+                axis.plot(
+                    x_grid,
+                    limit_array,
+                    color=TEXT_GREY,
+                    marker="o",
+                    linewidth=2.8,
+                    zorder=4,
+                )
+            else:
+                axis.plot(
+                    x_grid,
+                    limit_array,
+                    color="#111111" if diagnostic_key == "theorem2" else color,
+                    linestyle="--",
+                )
+                axis.errorbar(
+                    x_grid,
+                    averages_array,
+                    yerr=intervals_array,
+                    color=TEXT_GREY,
+                    marker="o",
+                    capsize=3,
+                    linewidth=2.8,
+                    zorder=4,
+                )
             panel_averages.append(averages_array)
             panel_limits.append(limit_array)
         axis.set_title(title)
@@ -874,7 +892,7 @@ def _plot_coefficient_confirmation(
         )
     axes[0].set_ylabel("Value")
     legend_handles = []
-    if uses_sample_size_axis:
+    if uses_sample_size_axis and not exact_reference_only:
         legend_handles.extend(
             Line2D(
                 [0], [0], color=colors[index], marker="o",
@@ -882,8 +900,15 @@ def _plot_coefficient_confirmation(
             )
             for index, ratio in enumerate(series)
         )
-    legend_handles.extend(
-        (
+    if exact_reference_only:
+        legend_handles.append(
+            Line2D(
+                [0], [0], color=TEXT_GREY, marker="o", linewidth=2.8,
+                label="Exact proposition value",
+            )
+        )
+    else:
+        legend_handles.extend((
             Line2D(
                 [0], [0], color=TEXT_GREY, marker="o", linewidth=2.8,
                 label="Simulation average (95% CI)",
@@ -894,8 +919,7 @@ def _plot_coefficient_confirmation(
                 linestyle="--",
                 label="Theoretical limit",
             ),
-        )
-    )
+        ))
     axes[2].legend(handles=legend_handles, loc="best")
     figure.tight_layout()
     return figure
@@ -917,13 +941,14 @@ def plot_theorem2_confirmation(
 
 
 def plot_proposition2_confirmation(report: Mapping[str, Any]) -> Any:
-    """Plot Proposition 2 validation over n for fixed ratios below one."""
+    """Plot Proposition 2's exact core-only solution over n."""
     return _plot_coefficient_confirmation(
         report,
         validation_key="proposition2_validation",
         diagnostic_key="proposition2",
         condition_id=None,
         allow_main_fallback=False,
+        exact_reference_only=True,
         y_padding_fraction=PROPOSITION2_Y_PADDING_FRACTION,
     )
 

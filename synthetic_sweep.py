@@ -86,6 +86,7 @@ SYNTHETIC_SWEEP_CONFIG: dict[str, Any] = {
     # With d = q + 2, this selects d = 2000 and q = 1998 at n = 1000.
     "boundary_d_n_ratio": 2.0,
     # One switch skips all theorem/proposition diagnostics and validation jobs.
+    "run_main_sweep": True,
     "run_theory_checks": False,
     # Optional fixed-q/n Theorem 2 convergence sweep over sample sizes.
     "theorem2_validation": {
@@ -189,6 +190,7 @@ def _validated_config(config: Mapping[str, Any]) -> dict[str, Any]:
     if not np.isfinite(theorem2_d_n_ratio) or theorem2_d_n_ratio <= 0:
         raise ValueError("theorem2_d_n_ratio must be finite and positive.")
 
+    normalized["run_main_sweep"] = bool(config.get("run_main_sweep", True))
     run_theory_checks = bool(config.get("run_theory_checks", True))
     theorem2_raw = config.get("theorem2_validation")
     if theorem2_raw is None:
@@ -1138,15 +1140,19 @@ def run_sweep(
         report["gamma_sweep"] = [r for r in reports if r is not report]
         return report
     resolved = _validated_config(config)
-    jobs = [
-        {
-            "condition": condition,
-            "simulation": simulation,
-            "config": resolved,
-        }
-        for condition in resolved["conditions"]
-        for simulation in range(resolved["n_sim"])
-    ]
+    jobs = (
+        [
+            {
+                "condition": condition,
+                "simulation": simulation,
+                "config": resolved,
+            }
+            for condition in resolved["conditions"]
+            for simulation in range(resolved["n_sim"])
+        ]
+        if resolved["run_main_sweep"]
+        else []
+    )
     # The numerical work happens in compiled libraries that release the GIL.
     # Apply one global BLAS/OpenMP limit while worker threads run so each job
     # does not create another full numerical thread pool.
@@ -1254,6 +1260,7 @@ def run_sweep(
                 "exact_test_label_balance"
             ],
             "theory_checks_enabled": resolved["run_theory_checks"],
+            "main_sweep_enabled": resolved["run_main_sweep"],
             "theorem2_diagnostics_use_hard_margin_solution": resolved[
                 "run_theory_checks"
             ],
@@ -1336,13 +1343,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--base-seed", type=int)
     parser.add_argument("--gamma", type=float, help="Spurious feature scale only.")
     parser.add_argument("--gammas", type=float, nargs="+", help="Override editable gamma_values.")
-    parser.add_argument(
+    theory_group = parser.add_mutually_exclusive_group()
+    theory_group.add_argument(
         "--skip-theory-checks", action="store_true",
         help="Run only the main performance sweep, without theory validation.",
     )
-    parser.add_argument(
+    theory_group.add_argument(
         "--run-theory-checks", action="store_true",
         help="Run the configured Theorem 2 and Proposition 2 validation sweeps.",
+    )
+    theory_group.add_argument(
+        "--only-theory-checks",
+        action="store_true",
+        help=(
+            "Run only the configured theorem and proposition validation "
+            "sweeps, without the main performance sweep."
+        ),
     )
     parser.add_argument(
         "--ridge-lambda",
@@ -1419,8 +1435,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.skip_theory_checks:
         config["run_theory_checks"] = False
     if args.run_theory_checks:
-        if args.skip_theory_checks or args.gammas is not None:
-            raise ValueError("Theory checks require one gamma and cannot be skipped.")
+        if args.gammas is not None:
+            raise ValueError("Theory checks require one gamma.")
+        config["run_theory_checks"] = True
+        config.pop("gamma_values", None)
+    if args.only_theory_checks:
+        if args.gammas is not None:
+            raise ValueError("Theory checks require one gamma.")
+        config["run_main_sweep"] = False
         config["run_theory_checks"] = True
         config.pop("gamma_values", None)
     if args.ridge_lambda is not None:
@@ -1449,6 +1471,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             * len(config["d_n_ratio"])
             * int(config["n_sim"])
             * len(config.get("gamma_values", [config["gamma"]]))
+            if config.get("run_main_sweep", True)
+            else 0
         )
         run_theory_checks = bool(config.get("run_theory_checks", True))
         theorem_config = config.get("theorem2_validation", {})

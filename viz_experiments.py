@@ -61,6 +61,7 @@ from style import (
     PLOT_ANNOTATION_FONT_SIZE,
     PLOT_BAR_ANNOTATION_FONT_SIZE,
     PLOT_COMPARISON_TITLE_FONT_SIZE,
+    PLOT_DATASET_TICK_FONT_SIZE,
     PLOT_LABEL_FONT_SIZE,
     PLOT_LEGEND_FONT_SIZE,
     PLOT_RAYLEIGH_LABEL_FONT_SIZE,
@@ -1807,12 +1808,14 @@ def _draw_simplicity(
         positions,
         [DATASET_LABELS[dataset] for dataset in dataset_order],
     )
+    for tick_label in axis.get_xticklabels():
+        tick_label.set_fontsize(PLOT_DATASET_TICK_FONT_SIZE)
     if show_ylabel:
         axis.set_ylabel(
             _rayleigh_ylabel(trace_division),
             fontsize=PLOT_RAYLEIGH_LABEL_FONT_SIZE,
         )
-    axis.tick_params(axis="both", labelsize=PLOT_TICK_FONT_SIZE)
+    axis.tick_params(axis="y", labelsize=PLOT_TICK_FONT_SIZE)
     axis.legend(
         loc="upper center",
         bbox_to_anchor=(0.5, HSPACE_LEGEND),

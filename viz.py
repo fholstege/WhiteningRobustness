@@ -80,7 +80,7 @@ WHITENING_LABELS = {
 }
 WHITENING_COMPARISON_LABELS = {
     "whiten": "Empirical whitening",
-    "whiten_ledoit_wolf_nonlinear": "Nonlinear Ledoit–Wolf whitening",
+    "whiten_ledoit_wolf_nonlinear": "Whitening with the nonlinear shrinkage estimator",
 }
 WHITENING_COMPARISON_COLORS = {
     "whiten": PAPER_ORANGE,
@@ -960,7 +960,7 @@ def make_whitening_comparison_figure(
         markerfacecolor=WHITENING_COMPARISON_EFFECT_COLOR,
         markeredgewidth=1.2,
         linewidth=1.2,
-        label="Nonlinear Ledoit–Wolf − empirical",
+        label="Nonlinear shrinkage estimator − empirical",
     )
     if not include_legend:
         return figure

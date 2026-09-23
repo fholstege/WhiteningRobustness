@@ -24,7 +24,7 @@ PLOT_LEGEND_FONT_SIZE = 13
 PLOT_TITLE_FONT_SIZE = 16
 # Comparison-panel headings are intentionally quieter than general figure titles.
 PLOT_COMPARISON_TITLE_FONT_SIZE = 12
-# Dataset names need to remain legible in the grouped manuscript comparisons.
+# Dataset names need to remain legible and consistent across manuscript bar plots.
 PLOT_DATASET_TICK_FONT_SIZE = 14
 PLOT_ANNOTATION_FONT_SIZE = 11
 PLOT_BAR_ANNOTATION_FONT_SIZE = 10
