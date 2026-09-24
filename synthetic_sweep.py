@@ -730,28 +730,73 @@ def _appendix_below_one_diagnostics(
     *,
     train: Any,
     data_config: SyntheticConfig,
+    ridge_lambda: float,
 ) -> dict[str, Any]:
-    """Validate the appendix's exact core-only solution for q/n < 1."""
+    """Fit logistic regression after uncentered whitening for q/n < 1."""
     n = int(data_config.n_train)
     q = int(data_config.d - 2)
     psi = q / n
     signed_labels = 2.0 * np.asarray(train.y, dtype=np.float64) - 1.0
-    coefficients = np.zeros(data_config.d, dtype=np.float64)
-    coefficients[0] = 1.0
-    scores = np.asarray(train.X, dtype=np.float64) @ coefficients
+    matrix = np.asarray(train.X, dtype=np.float64)
+    second_moment = matrix.T @ matrix / float(n - 1)
+    eigenvalues, basis = np.linalg.eigh(second_moment)
+    largest_eigenvalue = float(eigenvalues[-1])
+    threshold = float(np.finfo(np.float64).eps * largest_eigenvalue)
+    retained = eigenvalues > threshold
+    if int(retained.sum()) != data_config.d:
+        raise RuntimeError(
+            "Proposition validation requires a full-rank uncentered second "
+            f"moment, but retained {int(retained.sum())} of {data_config.d} "
+            "directions."
+        )
+    retained_eigenvalues = eigenvalues[retained]
+    retained_basis = basis[:, retained]
+    whitened_train = (
+        matrix @ retained_basis / np.sqrt(retained_eigenvalues)[None, :]
+    )
+    fit = fit_logistic(
+        whitened_train,
+        train.y,
+        LogisticConfig(ridge_lambda=ridge_lambda, class_balanced=False),
+    )
+    if not fit.converged:
+        raise RuntimeError(
+            "Proposition-validation logistic regression did not converge: "
+            + "; ".join(fit.convergence_messages)
+        )
+    raw_coefficients = retained_basis @ (
+        np.asarray(fit.estimator.coef_, dtype=np.float64).reshape(-1)
+        / np.sqrt(retained_eigenvalues)
+    )
+    raw_intercept = float(
+        np.asarray(fit.estimator.intercept_, dtype=np.float64).reshape(-1)[0]
+    )
+    raw_margins = signed_labels * (matrix @ raw_coefficients + raw_intercept)
+    normalization = float(raw_margins.min())
+    if not np.isfinite(normalization) or normalization <= 0.0:
+        raise RuntimeError(
+            "Proposition-validation logistic regression did not separate the "
+            f"training sample; minimum signed margin={normalization:.8g}."
+        )
+    coefficients = raw_coefficients / normalization
+    intercept = raw_intercept / normalization
+    scores = matrix @ coefficients + intercept
     margins = signed_labels * scores
     maximum_margin_error = float(np.max(np.abs(margins - 1.0)))
-    if maximum_margin_error > 1e-12:
-        raise RuntimeError(
-            "Appendix validation failed: the core-only classifier does not "
-            "have uniform unit margins."
-        )
     noise_variance = float(data_config.sigma_epsilon**2 / q)
     if not np.isclose(noise_variance, 1.0):
         raise RuntimeError(
             "Appendix validation requires unit-variance nuisance coordinates."
         )
-    common_coefficients = {
+    noise_squared = float(np.dot(coefficients[2:], coefficients[2:]))
+    fitted_coefficients = {
+        "core": float(coefficients[0]),
+        "spurious": float(coefficients[1]),
+        "noise_norm": float(np.sqrt(noise_squared)),
+        "noise_squared_over_n": float(noise_squared / n),
+        "noise_prediction_variance": float(noise_variance * noise_squared),
+    }
+    exact_coefficients = {
         "core": 1.0,
         "spurious": 0.0,
         "noise_norm": 0.0,
@@ -761,7 +806,7 @@ def _appendix_below_one_diagnostics(
     return {
         "applicable": True,
         "regime": "appendix_below_one",
-        "solution_source": "appendix_core_only_proposition",
+        "solution_source": "fitted_uncentered_whitened_logistic_regression",
         "psi_q_over_n": float(psi),
         "prerequisites": {
             "q_over_n_below_one": bool(psi < 1.0),
@@ -771,11 +816,33 @@ def _appendix_below_one_diagnostics(
                 data_config.sigma_y == 0.0 and data_config.sigma_a == 0.0
             ),
             "unit_noise_coordinate_variance": True,
-            "uniform_unit_margins": True,
+            "full_rank_uncentered_second_moment": True,
+        },
+        "fit": fit.diagnostics(
+            data_dtype=SYNTHETIC_DTYPE,
+            metric_dtype=SYNTHETIC_DTYPE,
+        ),
+        "transform": {
+            "name": "uncentered_whiten",
+            "estimator": "empirical_second_moment",
+            "denominator": "n_minus_one",
+            "retained_rank": int(retained.sum()),
+            "original_dimension": int(data_config.d),
+            "largest_eigenvalue": largest_eigenvalue,
+            "smallest_retained_eigenvalue": float(retained_eigenvalues[0]),
+            "relative_tolerance": float(np.finfo(np.float64).eps),
+        },
+        "raw_logistic_coefficients": {
+            "core": float(raw_coefficients[0]),
+            "spurious": float(raw_coefficients[1]),
+            "noise_norm": float(np.linalg.norm(raw_coefficients[2:])),
+            "intercept": raw_intercept,
+            "minimum_training_margin": normalization,
         },
         "finite_sample": {
-            **common_coefficients,
-            "intercept": [0.0],
+            **fitted_coefficients,
+            "intercept": [float(intercept)],
+            "margin_normalization": normalization,
             "minimum_training_margin": float(margins.min()),
             "maximum_training_margin": float(margins.max()),
             "maximum_uniform_margin_error": maximum_margin_error,
@@ -783,7 +850,7 @@ def _appendix_below_one_diagnostics(
                 0.5 * np.dot(scores, scores) / (n - 1)
             ),
         },
-        "limit": dict(common_coefficients),
+        "limit": exact_coefficients,
     }
 
 
@@ -1037,9 +1104,16 @@ def _run_proposition2_validation_job(job: Mapping[str, Any]) -> dict[str, Any]:
         exact_test_label_balance=True,
     )
     train, _ = generate_train_test(data_config)
+    if resolved.get("ridge_lambda") is not None:
+        ridge_lambda = float(resolved["ridge_lambda"])
+    else:
+        ridge_lambda = 1.0 / (
+            data_config.n_train * float(resolved["sklearn_C"])
+        )
     proposition = _appendix_below_one_diagnostics(
         train=train,
         data_config=data_config,
+        ridge_lambda=ridge_lambda,
     )
     row = {
         **condition,
@@ -1049,6 +1123,7 @@ def _run_proposition2_validation_job(job: Mapping[str, Any]) -> dict[str, Any]:
         "noise_coordinate_std": float(
             proposition_config["noise_coordinate_std"]
         ),
+        "ridge_lambda": ridge_lambda,
         "proposition2": proposition,
     }
     return {
@@ -1229,7 +1304,7 @@ def run_sweep(
         if key not in {"conditions", "output", "overwrite"}
     }
     return {
-        "schema_version": 13,
+        "schema_version": 14,
         "kind": "synthetic_whitening_estimator_sweep",
         "status": "complete",
         "evaluated_at": datetime.now(timezone.utc).isoformat(),
@@ -1270,6 +1345,9 @@ def run_sweep(
             "proposition2_validation_regime": (
                 "uncentered_noiseless_signal_unit_noise"
             ),
+            "proposition2_coefficients_recovered_from_each_sample": True,
+            "proposition2_solver": "repository_logistic_regression",
+            "proposition2_margin_normalization": "minimum_training_margin",
             "workers": resolved["workers"],
             "effective_workers": effective_workers,
             "blas_threads_per_worker": resolved["blas_threads"],

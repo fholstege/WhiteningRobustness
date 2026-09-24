@@ -63,10 +63,11 @@ THEOREM2_Y_PADDING_FRACTION = 0.5
 # convergence-plot padding used for Theorem 2 makes its y-axis unnecessarily
 # tall.
 PROPOSITION2_Y_PADDING_FRACTION = 0.02
+PROPOSITION2_MINIMUM_Y_SPAN = 0.04
 
 
 def load_report(path: str | Path) -> dict[str, Any]:
-    """Load and validate a complete synthetic sweep report."""
+    """Load a complete main sweep or theory-only validation report."""
     source = Path(path).expanduser().resolve()
     report = json.loads(source.read_text(encoding="utf-8"))
     if report.get("kind") != "synthetic_whitening_estimator_sweep":
@@ -79,14 +80,22 @@ def load_report(path: str | Path) -> dict[str, Any]:
             "validation sweeps. "
             "Rerun synthetic_sweep.py before plotting."
         )
-    if not report.get("results"):
-        raise ValueError("Synthetic sweep contains no result rows.")
-    samples = report.get("plot_data", {}).get("decision_boundary_samples")
-    if not samples:
+    main_rows = report.get("results", [])
+    has_theory_rows = any(
+        report.get(key, {}).get("results", [])
+        for key in ("theorem2_validation", "proposition2_validation")
+    )
+    if not main_rows and not has_theory_rows:
         raise ValueError(
-            "Synthetic sweep contains no decision-boundary samples. "
-            "Rerun synthetic_sweep.py with plot_sample_size > 0."
+            "Synthetic sweep contains neither main-sweep nor theory-validation rows."
         )
+    if main_rows:
+        samples = report.get("plot_data", {}).get("decision_boundary_samples")
+        if not samples:
+            raise ValueError(
+                "Synthetic sweep contains no decision-boundary samples. "
+                "Rerun synthetic_sweep.py with plot_sample_size > 0."
+            )
     return report
 
 
@@ -692,6 +701,7 @@ def _theorem2_value_limits(
     theorem_limits: np.ndarray,
     *,
     padding_fraction: float = THEOREM2_Y_PADDING_FRACTION,
+    minimum_span: float = 0.0,
 ) -> tuple[float, float]:
     """Pad the joint simulation-average and theorem-limit range."""
     averages = np.asarray(simulation_averages, dtype=np.float64)
@@ -701,10 +711,17 @@ def _theorem2_value_limits(
         raise ValueError("Cannot set limits from empty or non-finite values.")
     if not np.isfinite(padding_fraction) or padding_fraction < 0:
         raise ValueError("Theorem 2 y-axis padding must be finite and nonnegative.")
+    if not np.isfinite(minimum_span) or minimum_span < 0:
+        raise ValueError("Minimum y-axis span must be finite and nonnegative.")
     lower = float(values.min())
     upper = float(values.max())
     span = upper - lower
-    if span <= 1e-12:
+    if span < minimum_span:
+        midpoint = 0.5 * (lower + upper)
+        lower = midpoint - 0.5 * minimum_span
+        upper = midpoint + 0.5 * minimum_span
+        span = minimum_span
+    elif span <= 1e-12:
         span = max(abs(lower), 1.0)
     padding = float(padding_fraction) * span
     return lower - padding, upper + padding
@@ -719,6 +736,7 @@ def _plot_coefficient_confirmation(
     allow_main_fallback: bool,
     exact_reference_only: bool = False,
     y_padding_fraction: float = THEOREM2_Y_PADDING_FRACTION,
+    minimum_y_span: float = 0.0,
 ) -> Any:
     """Plot coefficient convergence over n for a dedicated validation."""
     dedicated_rows = report.get(validation_key, {}).get("results", [])
@@ -832,24 +850,6 @@ def _plot_coefficient_confirmation(
                 intervals.append(interval)
                 limit_curve.append(float(limits[0]))
 
-            minimum_gap = (
-                float(np.min(np.diff(x_grid)))
-                if x_grid.size > 1
-                else max(0.1, 0.1 * abs(float(x_grid[0])))
-            )
-            jitter_width = 0.04 * minimum_gap
-            color = colors[series_index]
-            if not exact_reference_only:
-                for x_value, observed in zip(x_grid, observed_by_condition):
-                    offsets = np.linspace(-jitter_width, jitter_width, observed.size)
-                    axis.scatter(
-                        x_value + offsets,
-                        observed,
-                        s=10,
-                        color=color,
-                        alpha=0.18,
-                        edgecolors="none",
-                    )
             averages_array = np.asarray(averages)
             intervals_array = np.asarray(intervals)
             limit_array = np.asarray(limit_curve)
@@ -866,7 +866,7 @@ def _plot_coefficient_confirmation(
                 axis.plot(
                     x_grid,
                     limit_array,
-                    color="#111111" if diagnostic_key == "theorem2" else color,
+                    color="#111111",
                     linestyle="--",
                 )
                 axis.errorbar(
@@ -888,18 +888,11 @@ def _plot_coefficient_confirmation(
                 np.concatenate(panel_averages),
                 np.concatenate(panel_limits),
                 padding_fraction=y_padding_fraction,
+                minimum_span=minimum_y_span,
             )
         )
     axes[0].set_ylabel("Value")
     legend_handles = []
-    if uses_sample_size_axis and not exact_reference_only:
-        legend_handles.extend(
-            Line2D(
-                [0], [0], color=colors[index], marker="o",
-                label=fr"$q/n={float(ratio):g}$",
-            )
-            for index, ratio in enumerate(series)
-        )
     if exact_reference_only:
         legend_handles.append(
             Line2D(
@@ -911,17 +904,22 @@ def _plot_coefficient_confirmation(
         legend_handles.extend((
             Line2D(
                 [0], [0], color=TEXT_GREY, marker="o", linewidth=2.8,
-                label="Simulation average (95% CI)",
+                label="Simulation average",
             ),
             Line2D(
                 [0], [0],
-                color="#111111" if diagnostic_key == "theorem2" else TEXT_GREY,
+                color="#111111",
                 linestyle="--",
-                label="Theoretical limit",
+                label=(
+                    "Theoretical limit"
+                    if diagnostic_key == "theorem2"
+                    else "Exact proposition value"
+                ),
             ),
         ))
     axes[2].legend(handles=legend_handles, loc="best")
     figure.tight_layout()
+    figure.subplots_adjust(left=0.075, right=0.99)
     return figure
 
 
@@ -941,15 +939,16 @@ def plot_theorem2_confirmation(
 
 
 def plot_proposition2_confirmation(report: Mapping[str, Any]) -> Any:
-    """Plot Proposition 2's exact core-only solution over n."""
+    """Plot sample-recovered coefficients against Proposition 2's solution."""
     return _plot_coefficient_confirmation(
         report,
         validation_key="proposition2_validation",
         diagnostic_key="proposition2",
         condition_id=None,
         allow_main_fallback=False,
-        exact_reference_only=True,
+        exact_reference_only=False,
         y_padding_fraction=PROPOSITION2_Y_PADDING_FRACTION,
+        minimum_y_span=PROPOSITION2_MINIMUM_Y_SPAN,
     )
 
 
@@ -970,62 +969,65 @@ def generate_all_plots(
 ) -> dict[str, list[Path]]:
     """Generate and save all synthetic manuscript figures from one report."""
     configure_plot_style()
-    plot_data = report["plot_data"]
-    condition_id = _boundary_condition_id(
-        report,
-        boundary_ratio=boundary_ratio,
-        boundary_condition_id=boundary_condition_id,
-    )
-    simulation = (
-        int(plot_data["boundary_simulation"])
-        if boundary_simulation is None
-        else int(boundary_simulation)
-    )
-    available = set(_available_methods(report))
-    sample_sizes = sorted(
-        {int(row["n_train"]) for row in report["results"]}
-    )
-    selected_n_train = (
-        sample_sizes[0]
-        if performance_n_train is None
-        else int(performance_n_train)
-    )
-    if selected_n_train not in sample_sizes:
-        raise ValueError(
-            f"No performance rows exist for n_train={selected_n_train}; "
-            f"available values are {sample_sizes}."
-        )
+    main_rows = report.get("results", [])
+    has_main_sweep = bool(main_rows)
     if theorem2_condition_id is not None:
         theorem_condition: int | None = int(theorem2_condition_id)
     else:
         theorem_condition = None
 
-    if performance_methods is None:
-        default_methods = [unwhitened_method, "standardize", whitened_method]
-        methods = list(dict.fromkeys(default_methods))
-    else:
-        methods = list(dict.fromkeys(str(value) for value in performance_methods))
-    missing = [method for method in methods if method not in available]
-    if missing:
-        raise ValueError(
-            f"Performance method(s) absent from the sweep: {missing}."
+    if has_main_sweep:
+        plot_data = report["plot_data"]
+        condition_id = _boundary_condition_id(
+            report,
+            boundary_ratio=boundary_ratio,
+            boundary_condition_id=boundary_condition_id,
         )
+        simulation = (
+            int(plot_data["boundary_simulation"])
+            if boundary_simulation is None
+            else int(boundary_simulation)
+        )
+        available = set(_available_methods(report))
+        sample_sizes = sorted({int(row["n_train"]) for row in main_rows})
+        selected_n_train = (
+            sample_sizes[0]
+            if performance_n_train is None
+            else int(performance_n_train)
+        )
+        if selected_n_train not in sample_sizes:
+            raise ValueError(
+                f"No performance rows exist for n_train={selected_n_train}; "
+                f"available values are {sample_sizes}."
+            )
+        if performance_methods is None:
+            default_methods = [unwhitened_method, "standardize", whitened_method]
+            methods = list(dict.fromkeys(default_methods))
+        else:
+            methods = list(dict.fromkeys(str(value) for value in performance_methods))
+        missing = [method for method in methods if method not in available]
+        if missing:
+            raise ValueError(
+                f"Performance method(s) absent from the sweep: {missing}."
+            )
     destination = Path(output_dir).expanduser().resolve()
     normalized_formats = tuple(
         str(value).lower().lstrip(".") for value in formats
     )
     if not normalized_formats:
         raise ValueError("At least one output format is required.")
-    figure_names = [
-        "decision_boundaries",
-        "performance_vs_q_over_n",
-        f"performance_empirical_n{selected_n_train}",
-    ]
+    figure_names = []
+    if has_main_sweep:
+        figure_names.extend((
+            "decision_boundaries",
+            "performance_vs_q_over_n",
+            f"performance_empirical_n{selected_n_train}",
+        ))
     has_theorem2_rows = bool(
         report.get("theorem2_validation", {}).get("results", [])
     ) or any(
         row.get("theorem2", {}).get("applicable") is True
-        for row in report["results"]
+        for row in main_rows
     )
     has_proposition2_rows = bool(
         report.get("proposition2_validation", {}).get("results", [])
@@ -1034,7 +1036,7 @@ def generate_all_plots(
         figure_names.append("theorem2_confirmation")
     if has_proposition2_rows:
         figure_names.append("proposition2_confirmation")
-    if report.get("gamma_sweep"):
+    if has_main_sweep and report.get("gamma_sweep"):
         figure_names.append("performance_by_gamma")
     output_paths = [
         (destination / name).with_suffix(f".{extension}")
@@ -1051,28 +1053,29 @@ def generate_all_plots(
 
     figures: dict[str, Any] = {}
     try:
-        figures["decision_boundaries"] = plot_decision_boundaries(
-            report,
-            condition_id=condition_id,
-            simulation=simulation,
-            unwhitened_method=unwhitened_method,
-            whitened_method=whitened_method,
-        )
-        figures["performance_vs_q_over_n"] = plot_performance(
-            report, methods=methods, n_train=selected_n_train
-        )
-        if report.get("gamma_sweep"):
-            figures["performance_by_gamma"] = plot_gamma_comparison(
-                [report, *report["gamma_sweep"]], methods=methods,
-                n_train=selected_n_train,
-            )
-        figures[f"performance_empirical_n{selected_n_train}"] = (
-            plot_performance(
+        if has_main_sweep:
+            figures["decision_boundaries"] = plot_decision_boundaries(
                 report,
-                methods=("identity", "whiten"),
-                n_train=selected_n_train,
+                condition_id=condition_id,
+                simulation=simulation,
+                unwhitened_method=unwhitened_method,
+                whitened_method=whitened_method,
             )
-        )
+            figures["performance_vs_q_over_n"] = plot_performance(
+                report, methods=methods, n_train=selected_n_train
+            )
+            if report.get("gamma_sweep"):
+                figures["performance_by_gamma"] = plot_gamma_comparison(
+                    [report, *report["gamma_sweep"]], methods=methods,
+                    n_train=selected_n_train,
+                )
+            figures[f"performance_empirical_n{selected_n_train}"] = (
+                plot_performance(
+                    report,
+                    methods=("identity", "whiten"),
+                    n_train=selected_n_train,
+                )
+            )
         if has_theorem2_rows:
             figures["theorem2_confirmation"] = plot_theorem2_confirmation(
                 report, condition_id=theorem_condition
