@@ -58,28 +58,33 @@ def _paper_experiments(
     ]
 
 
-def expected_paths(*, include_theory_checks: bool) -> list[Path]:
+def expected_paths(
+    *, results_dir: Path = RESULTS_DIR, include_theory_checks: bool,
+) -> list[Path]:
     """Return the complete, deterministic set of paper-plot JSON inputs."""
+    comparison_dir = results_dir / "comparisons"
     paths = [
-        RESULTS_DIR / f"{dataset}_{embedding}_finetune.json"
+        results_dir / f"{dataset}_{embedding}_finetune.json"
         for dataset, embedding, _, _ in MAIN_EXPERIMENTS
     ]
     for dataset, embedding, _, _ in COMPARISON_EXPERIMENTS:
         stem = f"{dataset}_{embedding}"
         for method in ("DFR", "AFR", "NEUROTUNE"):
-            paths.append(COMPARISON_DIR / f"{stem}_{method}.json")
+            paths.append(comparison_dir / f"{stem}_{method}.json")
             suffix = "_aggregate_cb" if method == "NEUROTUNE" else "_aggregate"
-            paths.append(COMPARISON_DIR / f"{stem}_{method}{suffix}.json")
-    paths.append(RESULTS_DIR / "synthetic_gamma_sweep.json")
+            paths.append(comparison_dir / f"{stem}_{method}{suffix}.json")
+    paths.append(results_dir / "synthetic_gamma_sweep.json")
     if include_theory_checks:
-        paths.append(RESULTS_DIR / "synthetic_theory_checks.json")
+        paths.append(results_dir / "synthetic_theory_checks.json")
     return paths
 
 
-def _finetune_config(*, overwrite: bool, workers: int) -> dict[str, Any]:
+def _finetune_config(
+    *, results_dir: Path = RESULTS_DIR, overwrite: bool, workers: int,
+) -> dict[str, Any]:
     config = deepcopy(FINETUNE_RESULTS_CONFIG)
     config.update(
-        results_dir=str(RESULTS_DIR), overwrite=overwrite, workers=workers,
+        results_dir=str(results_dir), overwrite=overwrite, workers=workers,
         blas_threads=1, experiments=_paper_experiments(MAIN_EXPERIMENTS),
     )
     config["sweep_defaults"].update(
@@ -98,10 +103,12 @@ def _finetune_config(*, overwrite: bool, workers: int) -> dict[str, Any]:
     return config
 
 
-def _comparison_config(method: str, *, overwrite: bool, workers: int) -> dict[str, Any]:
+def _comparison_config(
+    method: str, *, results_dir: Path = RESULTS_DIR, overwrite: bool, workers: int,
+) -> dict[str, Any]:
     config = deepcopy(COMPARISON_CONFIG)
     config.update(
-        results_dir=str(COMPARISON_DIR), overwrite=overwrite, workers=workers,
+        results_dir=str(results_dir / "comparisons"), overwrite=overwrite, workers=workers,
         blas_threads=1, methods=[method],
         experiments=_paper_experiments(COMPARISON_EXPERIMENTS),
     )
@@ -175,26 +182,34 @@ def _synthetic_config(*, output: Path, overwrite: bool, workers: int, theory: bo
     return config
 
 
-def regenerate(*, overwrite: bool, workers: int, include_theory_checks: bool) -> list[Path]:
+def regenerate(
+    *, results_dir: Path = RESULTS_DIR, overwrite: bool, workers: int,
+    include_theory_checks: bool,
+) -> list[Path]:
     """Run the fixed paper protocol and return every saved JSON path."""
-    outputs = run_finetune_sweeps(_finetune_config(overwrite=overwrite, workers=workers))
+    comparison_dir = results_dir / "comparisons"
+    outputs = run_finetune_sweeps(_finetune_config(
+        results_dir=results_dir, overwrite=overwrite, workers=workers,
+    ))
     for method in ("DFR", "AFR", "NEUROTUNE"):
-        outputs.extend(run_comparisons(_comparison_config(method, overwrite=overwrite, workers=workers)))
+        outputs.extend(run_comparisons(_comparison_config(
+            method, results_dir=results_dir, overwrite=overwrite, workers=workers,
+        )))
     for dataset, embedding, _, _ in COMPARISON_EXPERIMENTS:
         stem = f"{dataset}_{embedding}"
         for method in ("DFR", "AFR", "NEUROTUNE"):
             suffix = "_aggregate_cb" if method == "NEUROTUNE" else "_aggregate"
             outputs.append(_aggregate(
-                COMPARISON_DIR / f"{stem}_{method}.json",
-                COMPARISON_DIR / f"{stem}_{method}{suffix}.json",
+                comparison_dir / f"{stem}_{method}.json",
+                comparison_dir / f"{stem}_{method}{suffix}.json",
                 method=method, overwrite=overwrite,
             ))
-    main_output = RESULTS_DIR / "synthetic_gamma_sweep.json"
+    main_output = results_dir / "synthetic_gamma_sweep.json"
     outputs.append(save_results(run_sweep(_synthetic_config(
         output=main_output, overwrite=overwrite, workers=workers, theory=False,
     )), main_output, overwrite=overwrite))
     if include_theory_checks:
-        theory_output = RESULTS_DIR / "synthetic_theory_checks.json"
+        theory_output = results_dir / "synthetic_theory_checks.json"
         outputs.append(save_results(run_sweep(_synthetic_config(
             output=theory_output, overwrite=overwrite, workers=workers, theory=True,
         )), theory_output, overwrite=overwrite))
@@ -204,22 +219,31 @@ def regenerate(*, overwrite: bool, workers: int, include_theory_checks: bool) ->
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--overwrite", action="store_true", help="Replace existing paper JSON files.")
+    parser.add_argument(
+        "--results-dir", default=str(RESULTS_DIR),
+        help="Directory for regenerated JSON files (default: results_paper).",
+    )
     parser.add_argument("--workers", type=int, default=1, help="Parallel workers per sweep (default: 1).")
     parser.add_argument("--include-theory-checks", action="store_true", help="Also generate synthetic_theory_checks.json.")
     parser.add_argument("--dry-run", action="store_true", help="List outputs without fitting models.")
     args = parser.parse_args(argv)
     if args.workers < 1:
         parser.error("--workers must be positive.")
-    paths = expected_paths(include_theory_checks=args.include_theory_checks)
+    results_dir = Path(args.results_dir).expanduser()
+    if not results_dir.is_absolute():
+        results_dir = (ROOT / results_dir).resolve()
+    paths = expected_paths(
+        results_dir=results_dir, include_theory_checks=args.include_theory_checks,
+    )
     if args.dry_run:
         print("Would generate:")
-        print("\n".join(str(path.relative_to(ROOT)) for path in paths))
+        print("\n".join(str(path) for path in paths))
         return
     if not args.overwrite:
         existing = [path for path in paths if path.exists()]
         if existing:
             parser.error("Existing results require --overwrite: " + ", ".join(map(str, existing)))
-    saved = regenerate(overwrite=args.overwrite, workers=args.workers,
+    saved = regenerate(results_dir=results_dir, overwrite=args.overwrite, workers=args.workers,
                        include_theory_checks=args.include_theory_checks)
     if set(saved) != set(paths):
         raise RuntimeError(

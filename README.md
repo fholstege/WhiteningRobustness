@@ -65,6 +65,9 @@ You can inspect the exact output plan without running experiments:
 .env/bin/python regenerate_results_paper.py --dry-run
 ```
 
+To test a full regeneration without replacing the manuscript results, choose
+another directory explicitly, for example `--results-dir results_paper_test`.
+
 ### 3. Regenerate the manuscript figures
 
 Once the JSON files exist, render every standard PNG used by the manuscript:
