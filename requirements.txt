@@ -1,0 +1,14 @@
+# One environment for evaluation, result regeneration, plots, tests, and
+# embedding export. Install with: python -m pip install -r requirements.txt
+numpy>=1.26,<2
+pandas>=2,<4
+scipy>=1.11,<2
+scikit-learn>=1.9,<1.10
+threadpoolctl>=3,<4
+matplotlib>=3.5,<4
+pytest>=7,<9
+pillow>=10,<13
+torch>=2.6,<3
+torchvision>=0.21,<1
+tqdm>=4.66,<5
+transformers>=4.56,<5
