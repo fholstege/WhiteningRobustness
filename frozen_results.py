@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Ridge sweeps on repeated train/validation splits of pretrained features.
 
-Edit FROZEN_RESULTS_CONFIG, extract the four bundles with gather_embeddings.py,
+Edit FROZEN_RESULTS_CONFIG, extract the bundles with gather_embeddings.py,
 then run ``python frozen_results.py --workers 2 --blas-threads 1``.
 Like finetune_results.py, this reuses the existing transform/ridge sweep and
 writes one aggregate-compatible JSON per dataset/backbone. Here replicates
@@ -32,6 +32,7 @@ from finetune_results import (
     _validated_whitening_variants,
 )
 from hyper_param_sweep import _validated_ridge_lambdas, save_sweep
+from paper_protocol import RIDGE_LAMBDAS
 
 
 FROZEN_RESULTS_CONFIG: dict[str, Any] = {
@@ -43,16 +44,11 @@ FROZEN_RESULTS_CONFIG: dict[str, Any] = {
     "blas_threads": 1,
     "progress_every": 10,
     "split_seeds": list(range(1, 11)),
-    # Retain the fine-tuned ridge path and extend its low end for unit-norm
-    # frozen CLIP features. This does not mutate the fine-tuned configuration.
+    # Use the manuscript's exact ridge path, without a low-end extension.
     "sweep_defaults": {
         **deepcopy(FINETUNE_RESULTS_CONFIG["sweep_defaults"]),
-        "ridge_lambdas": [
-            1e-7, 5e-7, 1e-6, 5e-6,
-            *FINETUNE_RESULTS_CONFIG["sweep_defaults"]["ridge_lambdas"],
-        ],
+        "ridge_lambdas": list(RIDGE_LAMBDAS),
     },
-    "selection_rule": "balanced_log_loss",
     "experiments": [
         {"dataset": dataset, "embedding": embedding, "class_balanced": True}
         for dataset in ("WB", "CelebA")
@@ -152,13 +148,7 @@ def _run_split_job(job: Mapping[str, Any]) -> list[dict[str, Any]]:
 
 
 def run_frozen_sweeps(config: Mapping[str, Any]) -> list[Path]:
-    """Validate all sources, sweep split seeds, and save selected-test summaries."""
-    from aggregate import aggregate_runs, format_aggregate
-
-    if config.get("selection_rule") not in {
-        "accuracy", "class_balanced_accuracy", "log_loss", "balanced_log_loss",
-    }:
-        raise ValueError("selection_rule must be a label-only validation metric.")
+    """Validate sources and save sweep candidates for aggregate.py."""
     workers, blas_threads = _validated_parallelism(config)
     progress_every = _validated_progress_every(config)
     seeds = list(config["split_seeds"])
@@ -229,35 +219,27 @@ def run_frozen_sweeps(config: Mapping[str, Any]) -> list[Path]:
                 results = list(executor.map(_run_split_job, jobs))
         runs = [run for rows in results for run in rows]
         failed = sum(run["status"] != "complete" for run in runs)
-        summary = aggregate_runs(
-            runs, default_selection_rule=config["selection_rule"],
-            refit_train_val=False, confidence=0.95,
-        )
-        summary["replicate_unit"] = "train_validation_split"
-        summary["uncertainty_scope"] = "split variability conditional on a fixed pretrained checkpoint and test set"
         report = {
             "schema_version": 1, "kind": "ridge_lambda_sweep",
             "status": "partial" if failed else "complete",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "config": {**base_job, **experiment, "split_seeds": seeds,
-                       "workers": workers, "selection_rule": config["selection_rule"],
+                       "workers": workers,
                        "replicate_unit": "train_validation_split", "model_choices": ["ridge_lambda"]},
             "run_count": len(runs), "failed_run_count": failed,
-            "runs": runs, "selected_results": summary,
+            "runs": runs,
         }
         outputs.append(save_sweep(report, output=output, results_dir=config["results_dir"],
                                   overwrite=bool(config.get("overwrite", False))))
-        formatted = format_aggregate(summary).replace(
-            "For repeated representations,", "For repeated train/validation splits,"
-        ).replace("matched representation seeds.", "matched split seeds.")
-        print(formatted, flush=True)
-        print("Replicates above are split seeds; the pretrained checkpoint and test set are fixed.", flush=True)
+        print(f"Saved: {outputs[-1]} ({len(runs)} candidates, {failed} failed). "
+              "Select and report results with aggregate.py.", flush=True)
     return outputs
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
-    parser.add_argument("--dataset", help="Filter configured dataset: WB or CelebA.")
+    parser.add_argument("--dataset", help="Filter by configured dataset (WB or CelebA).")
+    parser.add_argument("--summarize", type=Path, help="Compatibility alias for aggregate.py with balanced_log_loss, 95%% intervals, and no refit.")
     parser.add_argument("--embedding", help="Filter configured representation.")
     parser.add_argument("--split-seeds", nargs="+", type=int)
     parser.add_argument("--workers", type=int)
@@ -271,6 +253,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
+    if args.summarize is not None:
+        from aggregate import main as aggregate_main
+        aggregate_main(["--sweep", str(args.summarize), "--criterion", "balanced_log_loss",
+                        "--confidence", "0.95", "--no-refit-train-val"])
+        return
     config = deepcopy(FROZEN_RESULTS_CONFIG)
     for key in ("split_seeds", "workers", "blas_threads", "progress_every",
                 "artifact_root", "results_dir", "overwrite"):

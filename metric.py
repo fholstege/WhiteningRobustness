@@ -55,6 +55,7 @@ def selection_metric_statistics(
         1.0,
     )
     observation_losses = -np.log(true_probabilities)
+    class_accuracies = []
     class_losses = []
     class_accuracy_standard_errors = []
     class_loss_standard_errors = []
@@ -64,6 +65,7 @@ def selection_metric_statistics(
             raise ValueError(
                 "Balanced log loss requires every fitted class in validation."
             )
+        class_accuracies.append(float(np.mean(predictions[mask] == y[mask])))
         class_losses.append(observation_losses[mask].mean())
         class_accuracy_standard_errors.append(
             _standard_error_of_mean(predictions[mask] == y[mask])
@@ -75,6 +77,7 @@ def selection_metric_statistics(
     metrics = {
         "accuracy": float(accuracy_score(y, predictions)),
         "balanced_accuracy": float(balanced_accuracy_score(y, predictions)),
+        "worst_class_accuracy": float(np.min(class_accuracies)),
         "log_loss": float(
             log_loss(y, probabilities, labels=classes)
         ),
@@ -86,6 +89,9 @@ def selection_metric_statistics(
         "balanced_accuracy": float(
             np.sqrt(np.sum(np.square(class_accuracy_standard_errors)))
             / n_classes
+        ),
+        "worst_class_accuracy": float(
+            class_accuracy_standard_errors[int(np.argmin(class_accuracies))]
         ),
         "log_loss": _standard_error_of_mean(observation_losses),
         "balanced_log_loss": float(

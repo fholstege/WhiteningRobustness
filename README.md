@@ -13,21 +13,11 @@ the next one. Run the commands from the repository root.
 
 ### 1. Create the fine-tuned representations
 
-Run the project's fine-tuning script first. It is intentionally separate from
-the NumPy/scikit-learn evaluation code in this repository. Its job is to train
-the requested representation seeds and save their checkpoints and final linear
-heads.
-
-```bash
-python finetune.py
-```
-
-`finetune.py` is not included in this checkout, so obtain it with the training
-code and use its documented configuration for the paper seeds. Before moving
-on, use `gather_embeddings.py` (or the training script's corresponding export
-step) to create the required NumPy embedding bundles under
-`artifacts/embeddings/`. The paper workflow expects fixed train/validation
-splits and the saved heads under `artifacts/last_layers/`.
+Use the paper’s fine-tuned checkpoints and export fixed train, validation,
+and test embedding bundles with `gather_embeddings.py` or the original
+training code. The result regenerator takes these bundles as inputs and
+re-fits the linear probes. See [the control experiments](#control-experiments)
+for their additional representation bundles.
 
 ### 2. Regenerate all paper-result JSON files
 
@@ -45,11 +35,22 @@ Then generate the complete paper result set:
 .env/bin/python regenerate_results_paper.py --overwrite --workers 4
 ```
 
-This runs the fixed paper ridge sweeps for the six representation families,
-the DFR/AFR/NeuroTune comparison sweeps for the three main datasets, their
-paper-specific validation aggregation, and the synthetic gamma sweep. It
-writes 25 JSON reports under `results_paper/`. Existing reports are only
-replaced when `--overwrite` is supplied.
+This reproduces the experiments in `writing/iclr2027/main_v2.tex`: the
+six benchmark representation families, the DFR/AFR/NeuronTune comparisons,
+the two controls, and the main and appendix synthetic sweeps. It writes
+30 JSON reports under `results_paper/`. Pass `--overwrite` to replace an
+existing report.
+
+To rerun only the controls or only the synthetic experiments:
+
+```bash
+.env/bin/python regenerate_results_paper.py --section controls --workers 4
+.env/bin/python regenerate_results_paper.py --section synthetic --workers 4
+```
+
+The synthetic reports use `gamma=5` for the main experiment and
+`gamma=0.5, 1, 3` for the appendix, with 100 matched simulations per
+condition. Both use the same sample size and random seeds.
 
 To also regenerate the synthetic theory-validation report required by the two
 optional theory figures, run:
@@ -123,6 +124,50 @@ Download the original [Waterbirds data](https://github.com/kohpangwei/group_DRO/
 corresponding project-data archive. Follow each source's terms of use.
 `gather_embeddings.py --help` lists the supported data-path and checkpoint
 overrides for exporting bundles.
+
+## Control experiments
+
+Use ImageNet-pretrained ResNet-50 backbones fine-tuned on the corresponding
+task. The regenerator expects these NumPy bundles:
+
+| Control | Bundle directory | Representation seeds | Validation selection |
+| --- | --- | --- | --- |
+| Waterbirds without background correlation | `artifacts/embeddings/WB_no_spurious/resnet50/` | 1–5 | Class-balanced accuracy |
+| CIFAR-10 | `artifacts/embeddings/CIFAR10/resnet50/` | 0–2 | Balanced log loss |
+
+Use the original decorrelated Waterbirds split, where background is
+independent of class in training. For CIFAR-10, use the fixed seed-0,
+stratified 45,000/5,000 training/validation split of the official training
+set and the official 10,000-image test set. The split seed is independent
+of the backbone seeds. Set the CIFAR-10 evaluation group IDs equal to the
+class labels.
+
+If you have the original trusted PyTorch embedding exports, convert them
+before running the regenerator:
+
+```bash
+.env/bin/python prepare_wb_no_spurious.py
+.env/bin/python prepare_cifar10_finetuned.py
+```
+
+The Waterbirds converter reads archives under
+`artifacts/embeddings/WB/resnet50_no_spurious/`. The CIFAR-10 converter
+expects the legacy seed directories at its bundle directory above and
+replaces them in place after validating all seeds. It uses the split indices
+from `artifacts/embeddings/CIFAR10/resnet50_imagenet_v2/default/`; create that
+reference bundle with `gather_embeddings.py --dataset cifar10` if needed.
+The reference bundle supplies only the split and label order.
+
+`--section controls` writes one sweep and one selected result per control.
+The plot uses paired differences within representation seed, with 95%
+confidence intervals. To render it on its own:
+
+```bash
+.env/bin/python viz.py --plot-type no-spurious --overwrite
+```
+
+If you regenerated results in a separate directory, give that directory to
+`viz.py --control-results-dir`.
 
 ## Verification
 

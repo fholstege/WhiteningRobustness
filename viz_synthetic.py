@@ -15,8 +15,8 @@ without theorem/proposition checks. Then generate all figures with::
 
     python viz_synthetic.py results/synthetic_gamma_sweep.json
 
-This writes a 3-by-2 figure: gamma varies by row, with overall accuracy on the
-left and worst-group accuracy on the right, each plotted against q/n.
+This writes a 3-by-2 figure: gamma varies by row, with worst-group accuracy on
+the left and equal-group accuracy on the right, each plotted against q/n.
 """
 
 from __future__ import annotations
@@ -478,15 +478,15 @@ def plot_performance(
     n_train: int | None = None,
     axes: Any = None,
 ) -> Any:
-    """Plot overall and worst-group test accuracy against q/n."""
+    """Plot worst-group and equal-group test accuracy against q/n."""
     standalone = axes is None
     if standalone:
         figure, axes = plt.subplots(1, 2, figsize=(11.2, 4.4), sharex=True, sharey=True)
     else:
         figure = axes[0].figure
     panels = (
-        ("accuracy", "Overall accuracy"),
         ("worst_group_accuracy", "Worst-group accuracy"),
+        ("group_balanced_accuracy", "Equal-group accuracy"),
     )
     plotted_values: list[float] = []
     plotted_x_values: set[float] = set()
@@ -564,7 +564,7 @@ def plot_performance(
     if upper <= lower:
         upper = lower + 0.05
     axes[0].set_ylim(lower, upper)
-    axes[0].legend(loc="lower left")
+    axes[1].legend(loc="lower left")
 
     if standalone:
         figure.tight_layout()
@@ -596,22 +596,74 @@ def plot_gamma_comparison(
     sizes = sorted({int(row["n_train"]) for row in reports[0]["results"]})
     selected_n = sizes[0] if n_train is None else n_train
     configure_plot_style()
-    figure, axes = plt.subplots(len(reports), 2, figsize=(11.2, 3.7 * len(reports)),
+    figure, axes = plt.subplots(len(reports), 2, figsize=(11.2, 2.35 * len(reports)),
                                 sharex=True, sharey=True, squeeze=False)
     for row_index, (row_axes, report) in enumerate(
-        zip(axes, sorted(reports, key=lambda r: float(r["config"]["gamma"])))
+        zip(
+            axes,
+            sorted(
+                reports,
+                key=lambda r: float(r["config"]["gamma"]),
+                reverse=True,
+            ),
+        )
     ):
         plot_performance(report, methods=methods, n_train=selected_n, axes=row_axes)
-        for axis in row_axes:
-            axis.set_title(fr"$\gamma={float(report['config']['gamma']):g}$")
-            axis.set_ylim(0.0, 1.02)
+        gamma = float(report["config"]["gamma"])
+        if gamma in (0.5, 1.0):
+            # The blue curve coincides with whitening here. Make its footprint
+            # just large enough to remain visible underneath the red curve.
+            for axis in row_axes:
+                no_preprocessing = next(
+                    line
+                    for line in axis.get_lines()
+                    if line.get_label() == "No preprocessing"
+                )
+                no_preprocessing.set_linewidth(2.9)
+                no_preprocessing.set_markersize(7.0)
+        for column_index, axis in enumerate(row_axes):
+            axis.set_title(fr"$\gamma={gamma:g}$")
+            axis.set_ylim(0.0, 1.05)
+            axis.set_yticks(np.arange(0.0, 1.01, 0.2))
+            axis.set_ylabel(
+                "Worst-group\naccuracy"
+                if column_index == 0
+                else "Equal-group\naccuracy"
+            )
             if row_index < len(axes) - 1:
                 axis.set_xlabel("")
-        row_axes[0].get_legend().remove()
+        row_axes[1].get_legend().remove()
     handles, labels = axes[0, 0].get_legend_handles_labels()
     figure.legend(handles, labels, loc="lower center", ncol=len(methods))
     figure.tight_layout(rect=(0, 0.05, 1, 1))
     return figure
+
+
+def _gamma_filename_value(gamma: float) -> str:
+    """Return a compact, filesystem-safe gamma value."""
+    return f"{float(gamma):g}".replace("-", "minus_").replace(".", "p")
+
+
+def plot_performance_for_each_gamma(
+    report: Mapping[str, Any],
+    *,
+    methods: Sequence[str],
+    n_train: int | None = None,
+) -> dict[str, Any]:
+    """Render the manuscript's two-panel performance figure for every gamma."""
+    reports = [report, *report.get("gamma_sweep", [])]
+    figures: dict[str, Any] = {}
+    for gamma_report in sorted(
+        reports, key=lambda value: float(value["config"]["gamma"]), reverse=True
+    ):
+        gamma = float(gamma_report["config"]["gamma"])
+        name = f"performance_vs_q_over_n_gamma_{_gamma_filename_value(gamma)}"
+        figures[name] = plot_performance(
+            gamma_report,
+            methods=methods,
+            n_train=n_train,
+        )
+    return figures
 
 
 def plot_performance_by_sample_size(
@@ -1038,6 +1090,10 @@ def generate_all_plots(
         figure_names.append("proposition2_confirmation")
     if has_main_sweep and report.get("gamma_sweep"):
         figure_names.append("performance_by_gamma")
+        figure_names.extend(
+            f"performance_vs_q_over_n_gamma_{_gamma_filename_value(gamma_report['config']['gamma'])}"
+            for gamma_report in [report, *report["gamma_sweep"]]
+        )
     output_paths = [
         (destination / name).with_suffix(f".{extension}")
         for name in figure_names
@@ -1068,6 +1124,13 @@ def generate_all_plots(
                 figures["performance_by_gamma"] = plot_gamma_comparison(
                     [report, *report["gamma_sweep"]], methods=methods,
                     n_train=selected_n_train,
+                )
+                figures.update(
+                    plot_performance_for_each_gamma(
+                        report,
+                        methods=methods,
+                        n_train=selected_n_train,
+                    )
                 )
             figures[f"performance_empirical_n{selected_n_train}"] = (
                 plot_performance(
@@ -1124,10 +1187,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--theorem2-condition-id", type=int)
     parser.add_argument("--methods", nargs="+")
-    parser.add_argument(
+    gamma = parser.add_mutually_exclusive_group()
+    gamma.add_argument(
         "--gamma-reports", nargs="+",
         help="Additional matched reports differing only in gamma; render appendix comparison only.",
     )
+    gamma.add_argument("--gamma-comparison-only", action="store_true",
+                       help="Render only the gamma comparison from a combined sweep report.")
     parser.add_argument("--overwrite", action="store_true")
     return parser.parse_args(argv)
 
@@ -1135,9 +1201,13 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     report = load_report(args.results)
-    if args.gamma_reports:
+    if args.gamma_reports or args.gamma_comparison_only:
+        extra = (
+            [load_report(path) for path in args.gamma_reports]
+            if args.gamma_reports else report.get("gamma_sweep", [])
+        )
         figure = plot_gamma_comparison(
-            [report, *(load_report(path) for path in args.gamma_reports)],
+            [report, *extra],
             methods=args.methods or ("identity", "standardize", args.whitened_method),
             n_train=args.performance_n_train,
         )

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regenerate the data-backed PNGs included by writing/iclr2027/main.tex.
+"""Regenerate the data-backed PNGs included by writing/iclr2027/main_v2.tex.
 
 Run ``./regenerate_paper_plots.py`` from any directory. All plotting commands
 use this repository's ``.env/bin/python``. Pass ``--add-theory-plots`` to
@@ -23,8 +23,9 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parent
 PYTHON = ROOT / ".env" / "bin" / "python"
-MANUSCRIPT = ROOT / "writing" / "iclr2027" / "main.tex"
+MANUSCRIPT = ROOT / "writing" / "iclr2027" / "main_v2.tex"
 MAIN_SYNTHETIC_REPORT = ROOT / "results_paper" / "synthetic_gamma_sweep.json"
+APPENDIX_SYNTHETIC_REPORT = ROOT / "results_paper" / "synthetic_gamma_appendix.json"
 THEORY_REPORT = ROOT / "results_paper" / "synthetic_theory_checks.json"
 THEORY_OUTPUT = ROOT / "plots" / "synthetic_theory"
 PAPER_OUTPUT = ROOT / "plots" / "synthetic_fin"
@@ -92,9 +93,17 @@ def main() -> None:
     args = parser.parse_args()
     if not PYTHON.is_file():
         parser.error(f"Missing virtual environment Python: {PYTHON}")
-    if not MAIN_SYNTHETIC_REPORT.is_file():
-        parser.error(f"Missing synthetic results: {MAIN_SYNTHETIC_REPORT}")
-    validate_comparison_inputs()
+    if not args.dry_run:
+        required = (
+            MAIN_SYNTHETIC_REPORT, APPENDIX_SYNTHETIC_REPORT,
+            ROOT / "results_paper" / "WB_no_spurious_resnet50_finetune_aggregate.json",
+            ROOT / "results_paper" / "CIFAR10_resnet50_finetune_aggregate.json",
+        )
+        for report in required:
+            if not report.is_file():
+                parser.error(f"Missing result: {report}. Run regenerate_results_paper.py first.")
+    if not args.dry_run:
+        validate_comparison_inputs()
 
     env = os.environ.copy()
     env.setdefault("MPLCONFIGDIR", str(Path(tempfile.gettempdir()) / "whitening-mpl"))
@@ -102,9 +111,18 @@ def main() -> None:
 
     steps = [
         (
-            "Synthetic main and appendix performance figures",
+            "Synthetic main experiment figures",
             ["viz_synthetic.py", str(MAIN_SYNTHETIC_REPORT),
              "--output-dir", "plots/synthetic_fin", "--overwrite"],
+        ),
+        (
+            "Synthetic spurious-feature scale",
+            ["viz_synthetic.py", str(APPENDIX_SYNTHETIC_REPORT),
+             "--gamma-comparison-only", "--output-dir", "plots", "--overwrite"],
+        ),
+        (
+            "Decorrelated Waterbirds and CIFAR-10",
+            ["viz.py", "--plot-type", "no-spurious", "--overwrite"],
         ),
         (
             "ERM group accuracy: Figures 3 and 12",
@@ -142,8 +160,14 @@ def main() -> None:
     for name, arguments in steps:
         run_step(name, arguments, dry_run=args.dry_run, env=env)
 
+    source = PAPER_OUTPUT / "performance_vs_q_over_n.png"
+    destination = PAPER_OUTPUT / "performance_vs_q_over_n_updated.png"
+    print(f"  copy {source.relative_to(ROOT)} -> {destination.relative_to(ROOT)}", flush=True)
+    if not args.dry_run:
+        shutil.copy2(source, destination)
+
     if args.add_theory_plots:
-        if not theory_report_is_complete():
+        if not args.dry_run and not theory_report_is_complete():
             raise FileNotFoundError(
                 "Theory plots require a completed validation report at "
                 f"{THEORY_REPORT}. Run the theory validation separately, then "
@@ -167,7 +191,7 @@ def main() -> None:
     expected = included_plots()
     theory_plots = {PAPER_OUTPUT / f"current_{name}.png" for name in THEORY_PLOT_NAMES}
     expected = expected if args.add_theory_plots else expected - theory_plots
-    expected_count = 12 if args.add_theory_plots else 10
+    expected_count = 14 if args.add_theory_plots else 12
     if len(expected) != expected_count:
         raise RuntimeError(
             f"Expected {expected_count} manuscript PNGs, found {len(expected)} in {MANUSCRIPT}. "

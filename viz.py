@@ -87,6 +87,16 @@ WHITENING_COMPARISON_COLORS = {
     "whiten_ledoit_wolf_nonlinear": PAPER_RED,
 }
 WHITENING_COMPARISON_EFFECT_COLOR = PAPER_ORANGE
+CANDIDATE_SET_METHODS = ("add_standardize", "all")
+CANDIDATE_SET_LABELS = {
+    "add_standardize": "Select from {none, standardization}",
+    "all": "Select from {none, standardization, whitening}",
+}
+CANDIDATE_SET_COLORS = {
+    "add_standardize": PAPER_GREEN,
+    "all": PAPER_RED,
+}
+CANDIDATE_SET_EFFECT_COLOR = PAPER_RED
 DEFAULT_WHITENING_ESTIMATOR = "ledoit-wolf-nonlinear"
 DEFAULT_WHITENING_METHOD = WHITENING_METHODS[DEFAULT_WHITENING_ESTIMATOR]
 FIGURE_CHOICES = ("main", "appendix", "both")
@@ -101,6 +111,7 @@ SELECTION_CHOICES = (
     "log_loss",
     "balanced_log_loss",
     "two_stage",
+    "worst_group_accuracy",
 )
 
 # These are deliberately editable manuscript presets rather than an experiment
@@ -199,6 +210,36 @@ class WhiteningComparisonRow:
     effect: Effect
 
 
+@dataclass(frozen=True)
+class CandidateSetComparisonRow:
+    """Matched nested preprocessing-candidate-set results for one dataset."""
+
+    dataset: str
+    representation: str
+    estimates: Mapping[str, Estimate]
+    effect: Effect
+
+
+@dataclass(frozen=True)
+class AccuracyDifferenceRow:
+    """Paired whitening effects relative to two baselines for one subgroup."""
+
+    label: str
+    effects: Mapping[str, Effect]
+
+
+WATERBIRDS_GROUP_LABELS = (
+    "Landbird / Land",
+    "Landbird / Water",
+    "Waterbird / Land",
+    "Waterbird / Water",
+)
+CIFAR10_CLASS_LABELS = (
+    "Airplane", "Automobile", "Bird", "Cat", "Deer",
+    "Dog", "Frog", "Horse", "Ship", "Truck",
+)
+
+
 def _resolved_path(value: str | Path) -> Path:
     path = Path(value).expanduser()
     if not path.is_absolute():
@@ -232,15 +273,18 @@ def aggregate_sweeps(
     criterion: str,
     exclude_single_iteration: bool,
     confidence: float,
+    compare_sets: bool = False,
 ) -> dict[str, Any]:
     """Aggregate selected sweep files in memory for immediate plotting."""
     runs, source_files = load_sweep_runs(paths)
-    report = aggregate_runs(
-        runs,
-        default_selection_rule=criterion,
-        exclude_single_iteration=exclude_single_iteration,
-        confidence=confidence,
-    )
+    options = {
+        "default_selection_rule": criterion,
+        "exclude_single_iteration": exclude_single_iteration,
+        "confidence": confidence,
+    }
+    if compare_sets:
+        options.update(add_standardize=True, all_preprocessing=True)
+    report = aggregate_runs(runs, **options)
     report["source_files"] = source_files
     return report
 
@@ -353,6 +397,82 @@ def _paired_effect(
         upper=upper,
         p_value=p_value,
         replicate_count=int(differences.size),
+    )
+
+
+def _effect_from_differences(
+    differences: Sequence[float], confidence: float,
+) -> Effect:
+    """Summarize already-paired differences without pooling observations."""
+    values = np.asarray(differences, dtype=np.float64)
+    if values.ndim != 1 or values.size == 0 or not np.isfinite(values).all():
+        raise ValueError("Paired differences must be a finite non-empty vector.")
+    observed = float(values.mean())
+    if values.size == 1:
+        lower = upper = observed
+        p_value = float("nan")
+    elif np.allclose(values, values[0], rtol=0.0, atol=1e-15):
+        lower = upper = observed
+        p_value = 1.0 if np.isclose(observed, 0.0, atol=1e-15) else 0.0
+    else:
+        half_width = float(
+            stats.sem(values)
+            * stats.t.ppf((1.0 + confidence) / 2.0, values.size - 1)
+        )
+        lower = observed - half_width
+        upper = observed + half_width
+        p_value = float(stats.ttest_1samp(values, 0.0).pvalue)
+    return Effect(
+        observed=observed, lower=lower, upper=upper, p_value=p_value,
+        replicate_count=int(values.size),
+    )
+
+
+def _subgroup_accuracy_difference_rows(
+    report: Mapping[str, Any], labels: Sequence[str], confidence: float,
+) -> list[AccuracyDifferenceRow]:
+    experiment = report["experiments"][0]
+    methods = _method_map(experiment)
+    whitening_keys = _replicate_keys(methods["whiten_ledoit_wolf_nonlinear"])
+    for baseline in BASELINES:
+        if _replicate_keys(methods[baseline]) != whitening_keys:
+            raise ValueError(f"Whitening and {baseline} seeds are not paired.")
+    references = {
+        baseline: methods[baseline]["test"]["per_group_accuracy"]
+        for baseline in BASELINES
+    }
+    whitening = methods["whiten_ledoit_wolf_nonlinear"]["test"][
+        "per_group_accuracy"
+    ]
+    rows = []
+    for group, label in enumerate(labels):
+        whitening_values = np.asarray(whitening[str(group)]["values"], dtype=float)
+        rows.append(AccuracyDifferenceRow(
+            label=label,
+            effects={
+                baseline: _effect_from_differences(
+                    whitening_values - np.asarray(
+                        references[baseline][str(group)]["values"], dtype=float,
+                    ),
+                    confidence,
+                )
+                for baseline in BASELINES
+            },
+        ))
+    return rows
+
+
+def prepare_no_spurious_accuracy_rows(
+    *, results_dir: str | Path = ROOT / "results_paper",
+    confidence: float = DEFAULT_CONFIDENCE,
+) -> tuple[list[AccuracyDifferenceRow], list[AccuracyDifferenceRow]]:
+    """Load paired group and class accuracies from the two control aggregates."""
+    directory = _resolved_path(results_dir)
+    waterbirds = load_report(directory / "WB_no_spurious_resnet50_finetune_aggregate.json")[0]
+    cifar = load_report(directory / "CIFAR10_resnet50_finetune_aggregate.json")[0]
+    return (
+        _subgroup_accuracy_difference_rows(waterbirds, WATERBIRDS_GROUP_LABELS, confidence),
+        _subgroup_accuracy_difference_rows(cifar, CIFAR10_CLASS_LABELS, confidence),
     )
 
 
@@ -541,6 +661,80 @@ def prepare_whitening_comparison_rows(
     return rows
 
 
+def prepare_candidate_set_comparison_row(
+    report: Mapping[str, Any],
+    *,
+    metric: str = DEFAULT_METRIC,
+    confidence: float = DEFAULT_CONFIDENCE,
+) -> CandidateSetComparisonRow:
+    """Compare nested candidate sets with and without whitening."""
+    if metric not in METRIC_CHOICES:
+        raise ValueError(f"Unsupported empirical metric {metric!r}.")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must lie strictly between zero and one.")
+    experiments = report.get("experiments")
+    if not isinstance(experiments, list) or len(experiments) != 1:
+        raise ValueError("Each report must contain exactly one experiment.")
+    experiment = experiments[0]
+    methods = _method_map(experiment)
+    missing = [method for method in CANDIDATE_SET_METHODS if method not in methods]
+    if missing:
+        raise ValueError(
+            f"representation={experiment.get('representation')!r} is missing "
+            f"candidate-set method(s): {', '.join(missing)}."
+        )
+    selected = {method: methods[method] for method in CANDIDATE_SET_METHODS}
+    if _replicate_keys(selected["add_standardize"]) != _replicate_keys(
+        selected["all"]
+    ):
+        raise ValueError("Candidate-set comparisons require matched replicates.")
+    estimates = {
+        method: _mean_estimate(_metric_values(selected[method], metric), confidence)
+        for method in CANDIDATE_SET_METHODS
+    }
+    effect = _paired_effect(
+        selected["all"], selected["add_standardize"],
+        metric=metric, confidence=confidence,
+    )
+    return CandidateSetComparisonRow(
+        dataset=str(experiment.get("dataset")),
+        representation=str(experiment.get("representation")),
+        estimates=estimates,
+        effect=effect,
+    )
+
+
+def prepare_candidate_set_comparison_rows(
+    reports: Sequence[Mapping[str, Any]],
+    *,
+    metric: str = DEFAULT_METRIC,
+    confidence: float = DEFAULT_CONFIDENCE,
+) -> list[CandidateSetComparisonRow]:
+    """Prepare nested candidate-set comparisons in manuscript dataset order."""
+    if not reports:
+        raise ValueError("At least one aggregate report is required.")
+    singleton_reports = [
+        {**report, "experiments": [experiment]}
+        for report in reports
+        for experiment in report.get("experiments", [])
+    ]
+    rows = [
+        prepare_candidate_set_comparison_row(
+            report, metric=metric, confidence=confidence,
+        )
+        for report in singleton_reports
+    ]
+    datasets = [row.dataset for row in rows]
+    if len(set(datasets)) != len(datasets):
+        raise ValueError("Each figure must contain distinct datasets.")
+    dataset_order = {dataset: index for index, dataset in enumerate(DATASET_LABELS)}
+    original_order = {id(row): index for index, row in enumerate(rows)}
+    rows.sort(key=lambda row: (
+        dataset_order.get(row.dataset, len(dataset_order)), original_order[id(row)]
+    ))
+    return rows
+
+
 def _row_label(row: EmpiricalRow) -> str:
     dataset = DATASET_LABELS.get(row.dataset, row.dataset)
     representation = REPRESENTATION_LABELS.get(
@@ -683,7 +877,9 @@ def _draw_effect_panel(
     axis.set_yticklabels(
         [_dataset_label(row) for row in rows], fontsize=PLOT_DATASET_TICK_FONT_SIZE
     )
-    axis.set_xlabel(f"Difference in {METRIC_LABELS[metric].lower()} (%)")
+    axis.set_xlabel(
+        f"Difference in {METRIC_LABELS[metric].lower()} (percentage points)"
+    )
     axis.yaxis.grid(False)
     axis.xaxis.grid(True)
     axis.tick_params(axis="y", length=0, pad=8)
@@ -976,6 +1172,267 @@ def make_whitening_comparison_figure(
     return figure
 
 
+def make_no_spurious_accuracy_figure(
+    waterbirds_rows: Sequence[AccuracyDifferenceRow],
+    cifar_rows: Sequence[AccuracyDifferenceRow],
+    *,
+    confidence: float = DEFAULT_CONFIDENCE,
+) -> Any:
+    """Draw paired subgroup accuracy changes when training is decorrelated."""
+    if not waterbirds_rows or not cifar_rows:
+        raise ValueError("Both no-spurious datasets must contain plot rows.")
+    configure_plot_style()
+    figure, axes = plt.subplots(1, 2, figsize=(11.2, 4.25))
+    figure.subplots_adjust(left=0.16, right=0.985, top=0.86,
+                           bottom=0.22, wspace=0.48)
+
+    all_rows = tuple(waterbirds_rows) + tuple(cifar_rows)
+    bounds = [0.0]
+    for row in all_rows:
+        for effect in row.effects.values():
+            bounds.extend((100.0 * effect.lower, 100.0 * effect.upper))
+    limit = max(abs(min(bounds)), abs(max(bounds)))
+    limit = max(0.5, np.ceil((1.12 * limit) * 2.0) / 2.0)
+
+    for axis, rows, title in zip(
+        axes,
+        (waterbirds_rows, cifar_rows),
+        ("Waterbirds without background correlation", "CIFAR-10"),
+    ):
+        positions = np.arange(len(rows) - 1, -1, -1, dtype=float)
+        offsets = {"identity": 0.17, "standardize": -0.17}
+        for row, y in zip(rows, positions):
+            for baseline in BASELINES:
+                effect = row.effects[baseline]
+                observed = 100.0 * effect.observed
+                lower = 100.0 * effect.lower
+                upper = 100.0 * effect.upper
+                axis.errorbar(
+                    observed, y + offsets[baseline],
+                    xerr=np.asarray([[observed - lower], [upper - observed]]),
+                    fmt=CONTRAST_MARKERS[baseline], markersize=5.8,
+                    markerfacecolor=CONTRAST_COLORS[baseline],
+                    markeredgecolor=CONTRAST_COLORS[baseline],
+                    ecolor=CONTRAST_COLORS[baseline], elinewidth=1.2,
+                    capsize=2.5, capthick=1.1, zorder=3,
+                )
+        axis.axvline(
+            0.0, color=PAPER_GREY, linestyle="--", linewidth=0.9, zorder=1,
+        )
+        axis.set_xlim(-limit, limit)
+        axis.set_ylim(-0.5, len(rows) - 0.5)
+        axis.set_yticks(positions)
+        axis.set_yticklabels([row.label for row in rows])
+        label_x = -0.31 if axis is axes[0] else -0.19
+        for tick_label in axis.get_yticklabels():
+            tick_label.set_horizontalalignment("left")
+            tick_label.set_x(label_x)
+        axis.set_title(title, fontsize=PLOT_LABEL_FONT_SIZE, pad=12)
+        axis.set_xlabel("Difference in accuracy (%)")
+        axis.xaxis.grid(False)
+        axis.yaxis.grid(True, alpha=0.20)
+        axis.tick_params(axis="y", length=0, pad=7)
+        axis.spines["left"].set_visible(False)
+
+    figure.legend(
+        handles=tuple(
+            Line2D(
+                [0], [0], marker=CONTRAST_MARKERS[baseline],
+                color=CONTRAST_COLORS[baseline],
+                markerfacecolor=CONTRAST_COLORS[baseline], linewidth=1.2,
+                label=_contrast_label(baseline),
+            )
+            for baseline in BASELINES
+        ),
+        loc="lower center", bbox_to_anchor=(0.5, 0.005), ncol=2,
+        fontsize=PLOT_LEGEND_FONT_SIZE,
+    )
+    return figure
+
+
+def _format_no_spurious_summary(
+    waterbirds_rows: Sequence[AccuracyDifferenceRow],
+    cifar_rows: Sequence[AccuracyDifferenceRow],
+) -> str:
+    lines = ["Accuracy; paired whitening effects"]
+    for dataset, rows in (("Waterbirds", waterbirds_rows), ("CIFAR-10", cifar_rows)):
+        lines.append(f"  {dataset}:")
+        for row in rows:
+            for baseline in BASELINES:
+                effect = row.effects[baseline]
+                lines.append(
+                    f"    {row.label}, {_contrast_label(baseline)}: "
+                    f"{100 * effect.observed:+.2f} pp "
+                    f"[{100 * effect.lower:+.2f}, {100 * effect.upper:+.2f}], "
+                    f"n={effect.replicate_count}"
+                )
+    return "\n".join(lines)
+
+
+def make_candidate_set_comparison_figure(
+    rows: Sequence[CandidateSetComparisonRow],
+    *,
+    metric: str = DEFAULT_METRIC,
+    confidence: float = DEFAULT_CONFIDENCE,
+    equal_group_rows: Sequence[CandidateSetComparisonRow] | None = None,
+    axes: Any = None,
+    include_legend: bool = True,
+) -> Any:
+    """Draw nested candidate sets and the paired gain from adding whitening."""
+    if not rows:
+        raise ValueError("Cannot plot an empty candidate-set comparison.")
+    configure_plot_style()
+    if equal_group_rows is not None:
+        figure, grid = plt.subplots(2, 2, figsize=(11.2, 8.0))
+        figure.subplots_adjust(
+            left=0.075, right=0.985, top=0.94, bottom=0.25,
+            wspace=0.36, hspace=HSPACE_DIFF,
+        )
+        make_candidate_set_comparison_figure(
+            rows, metric=metric, confidence=confidence,
+            axes=(grid[0, 0], grid[1, 0]),
+        )
+        make_candidate_set_comparison_figure(
+            equal_group_rows, metric="group_balanced_accuracy",
+            confidence=confidence, axes=(grid[0, 1], grid[1, 1]),
+            include_legend=False,
+        )
+        for axis in grid[0]:
+            axis.set_ylim(0, 105)
+            axis.set_yticks(np.arange(0, 101, 20))
+            axis.set_ylabel(axis.get_ylabel(), fontsize=PLOT_LABEL_FONT_SIZE)
+            axis.set_xticklabels(
+                [_dataset_label(row) for row in rows],
+                fontsize=PLOT_DATASET_TICK_FONT_SIZE,
+            )
+        grid[1, 1].tick_params(axis="y", labelleft=False)
+        for axis, panel_metric in zip(
+            grid[1], (metric, "group_balanced_accuracy")
+        ):
+            axis.set_xlabel(
+                f"Difference in {METRIC_LABELS[panel_metric].lower()} "
+                "(percentage points)",
+                fontsize=PLOT_LABEL_FONT_SIZE,
+            )
+            axis.tick_params(axis="x", labelsize=PLOT_TICK_FONT_SIZE)
+        for axis in grid.flat:
+            axis.tick_params(axis="y", labelsize=PLOT_TICK_FONT_SIZE)
+        return figure
+    if axes is None:
+        figure, axes = plt.subplots(
+            1, 2, figsize=(11.2, 5.5),
+            gridspec_kw={"width_ratios": (1.16, 1.0)},
+        )
+        figure.subplots_adjust(
+            left=0.075, right=0.985, top=0.86, bottom=0.31, wspace=0.30,
+        )
+    else:
+        figure = axes[0].figure
+
+    positions = np.arange(len(rows), dtype=np.float64)
+    width = 0.30
+    for method, offset in zip(CANDIDATE_SET_METHODS, (-width / 2.0, width / 2.0)):
+        estimates = [row.estimates[method] for row in rows]
+        means = 100.0 * np.asarray([estimate.mean for estimate in estimates])
+        lower = 100.0 * np.asarray([
+            estimate.mean - estimate.lower for estimate in estimates
+        ])
+        upper = 100.0 * np.asarray([
+            estimate.upper - estimate.mean for estimate in estimates
+        ])
+        bars = axes[0].bar(
+            positions + offset, means, width=width,
+            color=CANDIDATE_SET_COLORS[method], edgecolor="white", linewidth=0.7,
+            yerr=np.vstack((lower, upper)),
+            error_kw={
+                "ecolor": TEXT_GREY, "elinewidth": 0.9, "capsize": 2.5,
+                "capthick": 0.9,
+            },
+            zorder=3,
+        )
+        for bar, mean, confidence_top in zip(bars, means, means + upper):
+            axes[0].text(
+                bar.get_x() + bar.get_width() / 2.0, confidence_top + 1.2,
+                f"{mean:.1f}", ha="center", va="bottom",
+                fontsize=BAR_VALUE_ANNOTATION_FONT_SIZE, color=TEXT_GREY, zorder=4,
+            )
+    all_upper = [
+        100.0 * estimate.upper
+        for row in rows for estimate in row.estimates.values()
+    ]
+    axes[0].set_ylim(0.0, min(100.0, max(all_upper) + 10.0))
+    axes[0].set_xticks(positions)
+    axes[0].set_xticklabels(
+        [_dataset_label(row) for row in rows],
+        fontsize=PLOT_DATASET_TICK_FONT_SIZE,
+    )
+    axes[0].set_ylabel(f"{METRIC_LABELS[metric]} (%)")
+    axes[0].xaxis.grid(False)
+
+    effect_positions = np.arange(len(rows) - 1, -1, -1, dtype=np.float64)
+    bounds = [0.0]
+    for row, y in zip(rows, effect_positions):
+        observed = 100.0 * row.effect.observed
+        lower = 100.0 * row.effect.lower
+        upper = 100.0 * row.effect.upper
+        bounds.extend((lower, upper))
+        axes[1].errorbar(
+            observed, y,
+            xerr=np.asarray([[observed - lower], [upper - observed]]),
+            fmt="o", markersize=6.0,
+            markerfacecolor=CANDIDATE_SET_EFFECT_COLOR,
+            markeredgecolor=CANDIDATE_SET_EFFECT_COLOR,
+            markeredgewidth=1.2, ecolor=CANDIDATE_SET_EFFECT_COLOR,
+            elinewidth=1.2, capsize=3.0, capthick=1.2, zorder=3,
+        )
+        axes[1].annotate(
+            f"{observed:+.1f}", xy=(observed, y), xytext=(0, 7),
+            textcoords="offset points", ha="center", va="bottom",
+            fontsize=VALUE_ANNOTATION_FONT_SIZE,
+            color=CANDIDATE_SET_EFFECT_COLOR, zorder=4,
+        )
+    span = max(bounds) - min(bounds)
+    padding = max(0.8, 0.12 * span)
+    axes[1].set_xlim(min(bounds) - padding, max(bounds) + 1.5 * padding)
+    axes[1].axvline(0.0, color=PAPER_GREY, linestyle="--", linewidth=0.9, zorder=1)
+    axes[1].set_ylim(-0.5, len(rows) - 0.5)
+    axes[1].set_yticks(effect_positions)
+    axes[1].set_yticklabels(
+        [_dataset_label(row) for row in rows],
+        fontsize=PLOT_DATASET_TICK_FONT_SIZE,
+    )
+    axes[1].set_xlabel(
+        f"Difference in {METRIC_LABELS[metric].lower()} (percentage points)"
+    )
+    axes[1].yaxis.grid(False)
+    axes[1].xaxis.grid(True)
+    axes[1].tick_params(axis="y", length=0, pad=8)
+    axes[1].spines["left"].set_visible(False)
+
+    if not include_legend:
+        return figure
+    handles = [
+        Patch(
+            facecolor=CANDIDATE_SET_COLORS[method], edgecolor="white",
+            label=CANDIDATE_SET_LABELS[method],
+        )
+        for method in CANDIDATE_SET_METHODS
+    ]
+    handles.append(Line2D(
+        [0], [0], marker="o", color=CANDIDATE_SET_EFFECT_COLOR,
+        markerfacecolor=CANDIDATE_SET_EFFECT_COLOR, markeredgewidth=1.2,
+        linewidth=1.2,
+        label="With whitening as option − without whitening as option",
+    ))
+    figure.legend(
+        handles=handles, loc="lower center",
+        bbox_to_anchor=(0.5, 0.025 - HSPACE_LEGEND), ncol=2,
+        fontsize=EMPIRICAL_LEGEND_FONT_SIZE, handletextpad=0.55,
+        columnspacing=1.25,
+    )
+    return figure
+
+
 def _format_whitening_comparison_summary(
     rows: Sequence[WhiteningComparisonRow],
     *,
@@ -995,6 +1452,31 @@ def _format_whitening_comparison_summary(
         lines.append(f"  {_row_label(row).replace(chr(10), ' / ')}: {means}")
         lines.append(
             "    Nonlinear Ledoit–Wolf - empirical: "
+            f"{100 * effect.observed:+.2f} pp "
+            f"[{100 * effect.lower:+.2f}, {100 * effect.upper:+.2f}], "
+            f"p={p_value}, n={effect.replicate_count}"
+        )
+    return "\n".join(lines)
+
+
+def _format_candidate_set_comparison_summary(
+    rows: Sequence[CandidateSetComparisonRow],
+    *,
+    metric: str,
+) -> str:
+    """Format nested candidate-set estimates and paired gains."""
+    lines = [f"{METRIC_LABELS[metric]}; nested preprocessing candidate sets"]
+    for row in rows:
+        means = ", ".join(
+            f"{CANDIDATE_SET_LABELS[method]}="
+            f"{100 * row.estimates[method].mean:.2f}"
+            for method in CANDIDATE_SET_METHODS
+        )
+        effect = row.effect
+        p_value = "n/a" if not np.isfinite(effect.p_value) else f"{effect.p_value:.4g}"
+        lines.append(f"  {_row_label(row).replace(chr(10), ' / ')}: {means}")
+        lines.append(
+            "    With whitening as option - without whitening as option: "
             f"{100 * effect.observed:+.2f} pp "
             f"[{100 * effect.lower:+.2f}, {100 * effect.upper:+.2f}], "
             f"p={p_value}, n={effect.replicate_count}"
@@ -1057,6 +1539,21 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "Ridge-sweep JSON files to aggregate in memory before plotting. "
             "May include multiple datasets."
         ),
+    )
+    parser.add_argument(
+        "--plot-type",
+        choices=("standard", "compare-sets", "no-spurious"),
+        default="standard",
+        help=(
+            "Plot the standard preprocessing comparison or compare nested "
+            "candidate sets with and without whitening, or plot paired subgroup "
+            "accuracy effects for decorrelated Waterbirds and CIFAR-10 "
+            "(default: standard)."
+        ),
+    )
+    parser.add_argument(
+        "--control-results-dir", default=str(ROOT / "results_paper"),
+        help="Directory containing the two aggregates for --plot-type no-spurious.",
     )
     parser.add_argument(
         "--criterion",
@@ -1158,6 +1655,22 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
             "--compare-whitening-estimators cannot be combined with a single "
             "whitening estimator."
         )
+    if args.plot_type == "compare-sets" and args.compare_whitening_estimators:
+        parser.error(
+            "--plot-type compare-sets cannot be combined with "
+            "--compare-whitening-estimators."
+        )
+    if args.plot_type == "no-spurious" and (args.reports or args.sweep_paths):
+        parser.error(
+            "--plot-type no-spurious uses the two control aggregates and "
+            "cannot be combined with explicit reports or --sweep inputs."
+        )
+    if args.plot_type == "no-spurious" and (
+        args.group_accuracy_panels or args.compare_whitening_estimators
+    ):
+        parser.error(
+            "--plot-type no-spurious cannot be combined with other plot modes."
+        )
     if args.whitening_estimator is None and args.whitening_method is None:
         args.whitening_estimator = DEFAULT_WHITENING_ESTIMATOR
         args.whitening_method = WHITENING_METHODS[args.whitening_estimator]
@@ -1187,9 +1700,15 @@ def _output_stem(
 ) -> Path:
     if args.output:
         stem = _resolved_path(args.output)
-        if not custom and args.figure == "both":
+        if (not custom and args.figure == "both"
+                and args.plot_type != "no-spurious"):
             stem = stem.with_name(f"{stem.name}_{name}")
         return stem
+    if args.plot_type == "no-spurious":
+        return DEFAULT_OUTPUT_DIR / "no_spurious_group_class_accuracy"
+    if args.plot_type == "compare-sets":
+        suffix = "group_accuracy" if args.group_accuracy_panels else args.metric
+        return DEFAULT_OUTPUT_DIR / f"compare_sets_{name}_{args.criterion}_{suffix}"
     if args.group_accuracy_panels:
         estimator = ("whitening_estimators" if args.compare_whitening_estimators
                      else args.whitening_estimator.replace("-", "_"))
@@ -1220,6 +1739,27 @@ def main(argv: Sequence[str] | None = None) -> None:
     args = parse_args(argv)
     if args.group_accuracy_panels and args.metric != DEFAULT_METRIC:
         raise ValueError("--group-accuracy-panels requires the default metric.")
+    if args.plot_type == "no-spurious":
+        waterbirds_rows, cifar_rows = prepare_no_spurious_accuracy_rows(
+            results_dir=args.control_results_dir, confidence=float(args.confidence),
+        )
+        figure = make_no_spurious_accuracy_figure(
+            waterbirds_rows, cifar_rows, confidence=float(args.confidence),
+        )
+        try:
+            saved = save_figure(
+                figure,
+                _output_stem(args, "no_spurious", custom=False, input_paths=()),
+                formats=args.formats,
+                overwrite=bool(args.overwrite),
+            )
+        finally:
+            plt.close(figure)
+        print(_format_no_spurious_summary(waterbirds_rows, cifar_rows))
+        print("\nSaved:")
+        for path in saved:
+            print(f"  {path}")
+        return
     custom = bool(args.reports or args.sweep_paths)
     if args.reports:
         jobs = (("custom", "reports", tuple(args.reports)),)
@@ -1242,11 +1782,23 @@ def main(argv: Sequence[str] | None = None) -> None:
                         args.exclude_single_iteration
                     ),
                     confidence=float(args.confidence),
+                    compare_sets=args.plot_type == "compare-sets",
                 )
             ]
         else:
             reports = [load_report(path)[0] for path in input_paths]
-        if args.compare_whitening_estimators:
+        if args.plot_type == "compare-sets":
+            rows = prepare_candidate_set_comparison_rows(
+                reports, metric=args.metric, confidence=float(args.confidence),
+            )
+            figure = make_candidate_set_comparison_figure(
+                rows, metric=args.metric, confidence=float(args.confidence),
+                equal_group_rows=(prepare_candidate_set_comparison_rows(
+                    reports, metric="group_balanced_accuracy",
+                    confidence=float(args.confidence),
+                ) if args.group_accuracy_panels else None),
+            )
+        elif args.compare_whitening_estimators:
             rows = prepare_whitening_comparison_rows(
                 reports,
                 metric=args.metric,
@@ -1296,6 +1848,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         finally:
             plt.close(figure)
         comparison = (
+            "nested preprocessing candidate sets"
+            if args.plot_type == "compare-sets"
+            else
             "empirical versus nonlinear Ledoit--Wolf"
             if args.compare_whitening_estimators
             else f"whitening_estimator={args.whitening_estimator}"
@@ -1307,7 +1862,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             if input_kind == "sweeps"
             else "pre-aggregated input"
         )
-        if args.compare_whitening_estimators:
+        if args.plot_type == "compare-sets":
+            formatted_summary = _format_candidate_set_comparison_summary(
+                rows, metric=args.metric,
+            )
+        elif args.compare_whitening_estimators:
             formatted_summary = _format_whitening_comparison_summary(
                 rows,
                 metric=args.metric,

@@ -60,10 +60,10 @@ SYNTHETIC_SWEEP_CONFIG: dict[str, Any] = {
     # Synthetic data-generating process.
     "kappa_train": 0.9,
     "kappa_test": 0.5,
-    "gamma": 5.0,
+    "gamma": 0.1,
     # Editable appendix values. gamma above selects the original Figure 2.
     # All values share the same conditions and random seeds in one JSON.
-    "gamma_values": [1.0, 2.5, 5.0],
+    "gamma_values": [0.1],
     "sigma_y": 0.1,
     "sigma_a": 0.1,
     "sigma_epsilon": 20.0,
@@ -111,7 +111,7 @@ SYNTHETIC_SWEEP_CONFIG: dict[str, Any] = {
         "noise_coordinate_std": 1.0,
     },
     # Existing files are never overwritten.
-    "output": "results/synthetic_gamma_sweep.json",
+    "output": "results/synthetic_gamma_sweep_lower.json",
     "overwrite": False,
 }
 

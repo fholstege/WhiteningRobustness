@@ -37,6 +37,7 @@ from model import (
     reference_head_in_transform,
 )
 from numerics import OPTIMIZATION_DTYPE
+from paper_protocol import RIDGE_LAMBDAS
 from whitening import (
     make_transform,
     validate_whitening_estimator,
@@ -515,16 +516,18 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         dest="seeds",
-        type=int,
+        type=lambda value: None if value.lower() == "none" else int(value),
         nargs="+",
-        help="One or more embedding seeds. Ignored for DINO.",
+        help="Embedding seeds, or 'none' for a fixed pretrained representation.",
     )
     parser.add_argument(
         "--transform",
         dest="transforms",
         nargs="+",
     )
-    parser.add_argument(
+    grid = parser.add_mutually_exclusive_group()
+    grid.add_argument("--paper-grid", action="store_true", help="Use the paper's 24 ridge values.")
+    grid.add_argument(
         "--ridge-lambda",
         dest="ridge_lambdas",
         type=float,
@@ -601,6 +604,8 @@ def resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         config["representation"] = None
     if args.representation is not None:
         config["embedding_type"] = None
+    if args.paper_grid:
+        config["ridge_lambdas"] = list(RIDGE_LAMBDAS)
     return config
 
 

@@ -30,13 +30,16 @@ accuracy or loss selection criteria.
 exact ties favor the stronger ridge penalty. ``two_stage`` first maximizes
 that exact accuracy and then minimizes class-balanced log loss within exact
 ties.
+``worst_class_accuracy`` maximizes the minimum validation accuracy across
+labels, without using group labels.
 
 With ``--one-se``, a single-stage criterion instead forms an admissible set
 within one standard error of the best validation candidate and selects the
 largest ridge penalty in that set. Current sweeps save those validation
 standard errors; older sweep JSON must be regenerated before using this rule.
 
-With ``--one-mistake``, accuracy or class-balanced accuracy instead forms an
+With ``--one-mistake``, accuracy, class-balanced accuracy, or worst-class
+accuracy instead forms an
 admissible set whose score is no more than one validation mistake below the
 best candidate and selects the largest ridge penalty in that set. For
 class-balanced accuracy, the tolerance is the largest score change from one
@@ -45,6 +48,13 @@ mistake in any class: ``1 / (n_classes * min_class_count)``.
 Both fine-tuned representation seeds and frozen split seeds use the same
 ordinary procedure: select once per seed and average the selected held-out
 results across seeds.
+
+Optional candidate-set rows pool preprocessing methods before validation
+selection within each seed: ``--both`` uses identity and nonlinear
+Ledoit--Wolf whitening, ``--add-standardize`` uses identity and
+standardization, and ``--all`` uses all three. Thus a 12-value ridge grid
+contributes 24 candidates per seed to either two-method row and 36 candidates
+per seed to ``all``.
 """
 
 from __future__ import annotations
@@ -83,6 +93,12 @@ from whitening import make_transform
 
 
 STANDARD_AGGREGATION_MODE = "selected_test_per_seed"
+
+SYNTHETIC_CANDIDATE_METHODS = {
+    "both": ("identity", "whiten_ledoit_wolf_nonlinear"),
+    "add_standardize": ("identity", "standardize"),
+    "all": ("identity", "standardize", "whiten_ledoit_wolf_nonlinear"),
+}
 
 PAIRED_DIFFERENCE_METRICS = (
     "group_balanced_accuracy",
@@ -135,6 +151,13 @@ AGGREGATE_CONFIG = {
     "refit_workers": min(4, os.cpu_count() or 1),
     "refit_blas_threads": 1,
     "confidence": 0.90,
+    # Add validation selection over the union of identity and nonlinear-LW
+    # whitening ridge candidates, independently within every seed.
+    "both": False,
+    # Add the analogous identity-plus-standardization candidate-set row.
+    "add_standardize": False,
+    # Add a row selected over identity, standardization, and nonlinear-LW.
+    "all": False,
     # Optional paired, group-stratified test bootstrap for single-representation
     # experiments. This refits only the validation-selected heads and compares
     # every method with identity and standardize when standardize is present.
@@ -152,6 +175,7 @@ AGGREGATE_CONFIG = {
 SELECTION_CRITERIA = {
     "accuracy": "maximize",
     "class_balanced_accuracy": "maximize",
+    "worst_class_accuracy": "maximize",
     "log_loss": "minimize",
     "balanced_log_loss": "minimize",
     "two_stage": "two_stage",
@@ -313,13 +337,14 @@ def select_best_run(
     criterion: str,
     one_se: bool = False,
     one_mistake: bool = False,
+    allow_ordinary_worst_group: bool = False,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Select one run, allowing declared AFR/DFR validation-group selection."""
+    """Select one run, optionally allowing ordinary validation-group selection."""
     criterion = _validated_criterion(criterion)
     if one_se and one_mistake:
         raise ValueError("one_se and one_mistake are mutually exclusive.")
     candidate_runs = list(runs)
-    if criterion == "worst_group_accuracy":
+    if criterion == "worst_group_accuracy" and not allow_ordinary_worst_group:
         if not candidate_runs or not all(
             _is_oracle_dfr_run(run) or _is_group_aware_afr_run(run)
             for run in candidate_runs
@@ -328,6 +353,17 @@ def select_best_run(
                 "worst_group_accuracy selection is allowed only for explicitly "
                 "marked group-aware AFR or oracle DFR runs."
             )
+
+    def metric_value(run: dict[str, Any], metric: str) -> Any:
+        """Read a declared selection metric or an explicitly allowed val metric."""
+        value = run.get("selection", {}).get("metrics", {}).get(metric)
+        if (
+            value is None
+            and allow_ordinary_worst_group
+            and metric == "worst_group_accuracy"
+        ):
+            value = run.get("splits", {}).get("val", {}).get(metric)
+        return value
     two_stage_secondary = {"two_stage": "balanced_log_loss"}
     required_metrics = (
         ("balanced_accuracy", two_stage_secondary[criterion])
@@ -365,9 +401,8 @@ def select_best_run(
         )
         if selection.get("split") != expected_split:
             continue
-        metrics = selection.get("metrics", {})
         ridge_lambda = run.get("ridge_lambda")
-        values = [metrics.get(metric) for metric in required_metrics]
+        values = [metric_value(run, metric) for metric in required_metrics]
         if any(value is None for value in values) or ridge_lambda is None:
             continue
         if all(np.isfinite(float(value)) for value in values) and np.isfinite(
@@ -387,10 +422,12 @@ def select_best_run(
         return (*afr_hyperparameters(run), 0.0 if threshold is None else -float(threshold))
 
     def one_mistake_tolerance(run: dict[str, Any]) -> float:
-        if criterion not in {"accuracy", "class_balanced_accuracy"}:
+        if criterion not in {
+            "accuracy", "class_balanced_accuracy", "worst_class_accuracy"
+        }:
             raise ValueError(
-                "--one-mistake is defined only for accuracy or "
-                "class_balanced_accuracy selection."
+                "--one-mistake is defined only for accuracy, "
+                "class_balanced_accuracy, or worst_class_accuracy selection."
             )
         raw_counts = run.get("selection", {}).get("label_counts")
         if not isinstance(raw_counts, dict) or not raw_counts:
@@ -412,6 +449,8 @@ def select_best_run(
             counts.append(count)
         if criterion == "accuracy":
             return 1.0 / sum(counts)
+        if criterion == "worst_class_accuracy":
+            return 1.0 / min(counts)
         return 1.0 / (len(counts) * min(counts))
 
     if one_se:
@@ -435,7 +474,7 @@ def select_best_run(
                 f"--one-se requires a single-stage criterion, not {criterion!r}."
             )
         def score(run: dict[str, Any]) -> float:
-            return float(run["selection"]["metrics"][metric])
+            return float(metric_value(run, metric))
 
         best_by_score = sorted(
             usable,
@@ -499,7 +538,7 @@ def select_best_run(
         )
 
         def score(run: dict[str, Any]) -> float:
-            return float(run["selection"]["metrics"][metric])
+            return float(metric_value(run, metric))
 
         best_by_score = sorted(
             usable,
@@ -556,13 +595,13 @@ def select_best_run(
             )
     elif SELECTION_CRITERIA[criterion] == "maximize":
         key = lambda run: (
-            -float(run["selection"]["metrics"][criterion]),
+            -float(metric_value(run, criterion)),
             -float(run["ridge_lambda"]),
             *tuning_hyperparameters(run),
         )
     else:
         key = lambda run: (
-            float(run["selection"]["metrics"][criterion]),
+            float(metric_value(run, criterion)),
             -float(run["ridge_lambda"]),
             *tuning_hyperparameters(run),
         )
@@ -600,6 +639,7 @@ def _selection_rule_for_method(
             "sfit",
             "accuracy",
             "class_balanced_accuracy",
+            "worst_class_accuracy",
             "log_loss",
             "balanced_log_loss",
             "two_stage",
@@ -607,7 +647,7 @@ def _selection_rule_for_method(
         if criterion not in allowed:
             raise ValueError(
                 "NeuroTune selection must be group-free; choose sfit, "
-                "accuracy, class_balanced_accuracy, log_loss, "
+                "accuracy, class_balanced_accuracy, worst_class_accuracy, log_loss, "
                 "balanced_log_loss, or two_stage."
             )
         return criterion
@@ -640,6 +680,8 @@ def _selected_validation_metric(
         if criterion == "class_balanced_accuracy"
         else criterion
     )
+    if metric == "worst_group_accuracy" and metric not in metrics:
+        return float(run["splits"]["val"][metric])
     return float(metrics[metric])
 
 
@@ -1788,6 +1830,9 @@ def aggregate_runs(
     one_mistake: bool = False,
     refit_train_val: bool | None = None,
     confidence: float = 0.90,
+    both: bool = False,
+    add_standardize: bool = False,
+    all_preprocessing: bool = False,
     bootstrap: bool = False,
     bootstrap_resamples: int = 10_000,
     bootstrap_seed: int = 0,
@@ -1796,7 +1841,11 @@ def aggregate_runs(
     refit_workers: int | None = None,
     refit_blas_threads: int = 1,
 ) -> dict[str, Any]:
-    """Select per bundle/method, then average selected test metrics."""
+    """Select per bundle/method, then average selected test metrics.
+
+    Candidate-set flags additionally select per bundle over their declared
+    union of preprocessing and ridge candidates.
+    """
     if not 0 < confidence < 1:
         raise ValueError("confidence must lie strictly between zero and one.")
     if bootstrap_resamples <= 0:
@@ -2058,8 +2107,61 @@ def aggregate_runs(
                 criterion=criterion,
                 one_se=one_se,
                 one_mistake=one_mistake,
+                allow_ordinary_worst_group=(
+                    criterion == "worst_group_accuracy"
+                ),
             )
             selected_by_method.setdefault(method, []).append(selected)
+
+        enabled_candidate_sets = {
+            method: SYNTHETIC_CANDIDATE_METHODS[method]
+            for method, enabled in (
+                ("both", both),
+                ("add_standardize", add_standardize),
+                ("all", all_preprocessing),
+            )
+            if enabled
+        }
+        for synthetic_method, candidate_methods in enabled_candidate_sets.items():
+            fingerprints = {
+                str(run["bundle"].get("fingerprint")) for run in experiment_runs
+            }
+            missing_synthetic_candidates: list[str] = []
+            for fingerprint in sorted(fingerprints):
+                pooled: list[dict[str, Any]] = []
+                missing_methods: list[str] = []
+                for method in candidate_methods:
+                    method_candidates = candidates.get((fingerprint, method), [])
+                    if not method_candidates:
+                        missing_methods.append(method)
+                    pooled.extend(method_candidates)
+                if missing_methods:
+                    missing_synthetic_candidates.append(
+                        f"fingerprint={fingerprint}: {', '.join(missing_methods)}"
+                    )
+                    continue
+                criterion = _selection_rule_for_method(
+                    synthetic_method,
+                    default_rule=default_rule,
+                    selection_rules=rules,
+                )
+                selected, _ = select_best_run(
+                    pooled,
+                    criterion=criterion,
+                    one_se=one_se,
+                    one_mistake=one_mistake,
+                    allow_ordinary_worst_group=(
+                        criterion == "worst_group_accuracy"
+                    ),
+                )
+                selected_by_method.setdefault(synthetic_method, []).append(selected)
+            if missing_synthetic_candidates:
+                raise ValueError(
+                    f"--{synthetic_method.replace('_', '-')} requires "
+                    + ", ".join(candidate_methods)
+                    + " candidates for every seed; missing "
+                    + "; ".join(missing_synthetic_candidates)
+                )
 
         refit_methods = {
             method for method, selected_runs in selected_by_method.items()
@@ -2158,6 +2260,10 @@ def aggregate_runs(
                 }
             )
             metrics = {
+                "class_balanced_accuracy": _mean_interval(
+                    (run["splits"]["test"]["balanced_accuracy"] for run in selected_runs),
+                    confidence=confidence,
+                ),
                 "accuracy": _mean_interval(
                     (
                         run["splits"]["test"]["accuracy"]
@@ -2311,6 +2417,25 @@ def aggregate_runs(
                     "selected_ridge_lambdas": [
                         float(run["ridge_lambda"]) for run in selected_runs
                     ],
+                    "selected_preprocessing_methods": [
+                        str(run["method"]) for run in selected_runs
+                    ],
+                    "selection_candidate_counts": [
+                        (
+                            sum(
+                                len(candidates.get((
+                                    str(run["bundle"].get("fingerprint")),
+                                    candidate_method,
+                                ), []))
+                                for candidate_method in SYNTHETIC_CANDIDATE_METHODS[method]
+                            )
+                            if method in SYNTHETIC_CANDIDATE_METHODS
+                            else len(candidates.get((
+                                str(run["bundle"].get("fingerprint")), method
+                            ), []))
+                        )
+                        for run in selected_runs
+                    ],
                     "selected_afr_gammas": [
                         (
                             None
@@ -2330,6 +2455,11 @@ def aggregate_runs(
                     "selected": [
                         {
                             "bundle": run["bundle"],
+                            # Synthetic policies such as ``both`` retain the
+                            # concrete preprocessing run chosen within each
+                            # seed so downstream metric enrichers can resolve
+                            # the saved candidate correctly.
+                            "preprocessing_method": str(run["method"]),
                             "ridge_lambda": run["ridge_lambda"],
                             "test_refit": run.get("test_refit"),
                             "afr_gamma": run.get("afr_gamma"),
@@ -2359,6 +2489,16 @@ def aggregate_runs(
                             **(
                                 {
                                     "validation_one_mistake_tolerance": (
+                                        1.0
+                                        / min(
+                                            int(count)
+                                            for count in run["selection"][
+                                                "label_counts"
+                                            ].values()
+                                        )
+                                        if criterion
+                                        == "worst_class_accuracy"
+                                        else
                                         1.0
                                         / (
                                             len(run["selection"]["label_counts"])
@@ -2410,6 +2550,13 @@ def aggregate_runs(
                     else {}
                 ),
                 "aggregation_mode": STANDARD_AGGREGATION_MODE,
+                "both_candidate_methods": (
+                    list(SYNTHETIC_CANDIDATE_METHODS["both"]) if both else None
+                ),
+                "candidate_set_methods": {
+                    method: list(candidate_methods)
+                    for method, candidate_methods in enabled_candidate_sets.items()
+                },
                 "candidate_ridge_lambdas": sorted(
                     {
                         float(run["ridge_lambda"])
@@ -2456,7 +2603,6 @@ def aggregate_runs(
                 "methods": methods,
             }
         )
-
     has_test_bootstrap = any(
         "paired_test_bootstrap" in method
         for experiment in experiments
@@ -2539,6 +2685,19 @@ def aggregate_runs(
             "oracle_split": "dfr_val" if oracle_group_methods else None,
             "default_rule": default_rule,
             "method_rules": rules,
+            "both": {
+                "enabled": bool(both),
+                "candidate_methods": list(SYNTHETIC_CANDIDATE_METHODS["both"]),
+                "selection_unit": "embedding_seed",
+            },
+            "candidate_sets": {
+                method: {
+                    "enabled": method in enabled_candidate_sets,
+                    "candidate_methods": list(candidate_methods),
+                    "selection_unit": "embedding_seed",
+                }
+                for method, candidate_methods in SYNTHETIC_CANDIDATE_METHODS.items()
+            },
             "ridge_lambda_subset": (
                 list(selected_ridges) if selected_ridges is not None else None
             ),
@@ -2701,6 +2860,7 @@ def format_aggregate(report: dict[str, Any]) -> str:
     max_gamma = report.get("selection", {}).get("max_gamma")
     for experiment in report["experiments"]:
         methods = experiment["methods"]
+        has_class_accuracy = all("class_balanced_accuracy" in method["test"] for method in methods)
         has_afr_gamma = any(
             any(value is not None for value in method.get("selected_afr_gammas", []))
             for method in methods
@@ -2737,14 +2897,15 @@ def format_aggregate(report: dict[str, Any]) -> str:
                 else ()
             ),
             "n",
+            *(("class-balanced",) if has_class_accuracy else ()),
             "equal-group",
             "worst-group",
             *(f"g={group}" for group in group_ids),
-            *(() if not has_identity_difference else ("Δworst vs identity",)),
+            *(() if not has_identity_difference else (f"Δworst vs identity",)),
             *(
                 ()
                 if not has_standardize_difference
-                else ("Δworst vs standardize",)
+                else (f"Δworst vs standardize",)
             ),
         )
         rows = []
@@ -2766,6 +2927,8 @@ def format_aggregate(report: dict[str, Any]) -> str:
                     ),)
                       if has_neurotune_threshold else ()),
                     str(method["replicate_count"]),
+                    *((_format_interval(test["class_balanced_accuracy"]),)
+                      if has_class_accuracy else ()),
                     _format_interval(test["group_balanced_accuracy"]),
                     _format_interval(test["worst_group_accuracy"]),
                     *(
@@ -2852,10 +3015,10 @@ def format_aggregate(report: dict[str, Any]) -> str:
                 "",
             )
         )
-    lines.extend(
-        (
-            "g=* columns are per-group accuracy.",
-        )
+    lines.append("g=* columns are per-group accuracy.")
+    ordinary_uses_worst_group = (
+        report.get("selection", {}).get("default_rule")
+        == "worst_group_accuracy"
     )
     if not report.get("selection", {}).get("one_mistake_rule", {}).get(
         "enabled"
@@ -2863,16 +3026,28 @@ def format_aggregate(report: dict[str, Any]) -> str:
         lines.extend(
             (
                 "class_balanced_accuracy uses exact label-balanced accuracy",
-                "and only then favors stronger ridge; ordinary methods do not use",
-                "group labels for selection.",
+                "and only then favors stronger ridge.",
             )
         )
     else:
-        lines.extend(
-            (
-                "class_balanced_accuracy uses label-balanced accuracy; ordinary",
-                "methods do not use group labels for selection.",
-            )
+        lines.append(
+            "class_balanced_accuracy uses label-balanced accuracy."
+        )
+    if ordinary_uses_worst_group:
+        lines.append(
+            "Ordinary method rows use validation group labels to select by worst-group accuracy."
+        )
+    else:
+        lines.append("Ordinary method rows do not use group labels for selection.")
+    group_aware_candidate_sets = [
+        method for method in SYNTHETIC_CANDIDATE_METHODS
+        if report.get("selection", {}).get("method_rules", {}).get(method)
+        == "worst_group_accuracy"
+    ]
+    if group_aware_candidate_sets:
+        lines.append(
+            "Candidate-set rows using validation group labels for worst-group "
+            "selection: " + ", ".join(group_aware_candidate_sets) + "."
         )
     if report.get("selection", {}).get("one_standard_error_rule", {}).get(
         "enabled"
@@ -3031,8 +3206,9 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         dest="default_selection_rule",
         help=(
             "Selection rule for ordinary methods and NeuroTune: accuracy, "
-            "class_balanced_accuracy, log_loss, balanced_log_loss, "
-            "two_stage, or sfit. When omitted, ordinary methods and "
+            "class_balanced_accuracy, worst_class_accuracy, log_loss, balanced_log_loss, "
+            "two_stage, worst_group_accuracy, or sfit. Worst-group selection "
+            "uses validation group labels. When omitted, ordinary methods and "
             "NeuroTune use class_balanced_accuracy. DFR and AFR "
             "retain their method-specific group-aware defaults."
         ),
@@ -3160,6 +3336,35 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--confidence", type=float)
     parser.add_argument(
+        "--both",
+        action="store_true",
+        default=None,
+        help=(
+            "Add a row selected independently per seed over all eligible "
+            "ridge candidates from identity and nonlinear Ledoit--Wolf whitening."
+        ),
+    )
+    parser.add_argument(
+        "--add-standardize",
+        "--add_standardize",
+        dest="add_standardize",
+        action="store_true",
+        default=None,
+        help=(
+            "Add a row selected independently per seed over all eligible "
+            "ridge candidates from identity and standardization."
+        ),
+    )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        default=None,
+        help=(
+            "Add a row selected independently per seed over identity, "
+            "standardization, and nonlinear Ledoit--Wolf whitening candidates."
+        ),
+    )
+    parser.add_argument(
         "--bootstrap",
         action="store_true",
         default=None,
@@ -3212,6 +3417,9 @@ def resolved_config(args: argparse.Namespace) -> dict[str, Any]:
         "refit_workers",
         "refit_blas_threads",
         "confidence",
+        "both",
+        "add_standardize",
+        "all",
         "bootstrap",
         "bootstrap_resamples",
         "bootstrap_seed",
@@ -3255,6 +3463,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         one_mistake=bool(config["one_mistake"]),
         refit_train_val=config["refit_train_val"],
         confidence=float(config["confidence"]),
+        both=bool(config["both"]),
+        add_standardize=bool(config["add_standardize"]),
+        all_preprocessing=bool(config["all"]),
         bootstrap=bool(config["bootstrap"]),
         bootstrap_resamples=int(config["bootstrap_resamples"]),
         bootstrap_seed=int(config["bootstrap_seed"]),

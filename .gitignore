@@ -3,23 +3,52 @@ __pycache__/
 .DS_Store
 .pytest_cache/
 .ruff_cache/
+.coverage
+htmlcov/
 .env/
 .venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# Large or locally generated inputs required only at reproduction time.
+# Obtain datasets, checkpoints, and embedding bundles separately.
 models/*
 artifacts/*
-.vscode/
-*.egg-info/
 data/
+
+# Experiment outputs and rendered figures.
 results/
+results/*
+results_check/
+results_paper/
+results_paper_v_2/
+results_frozen/
+plots/
+
+# Paper drafts, Overleaf exports, local notes, and compiled LaTeX artifacts.
+writing/
+overleaf_iclr2027/
 **/*.aux
 **/*.bbl
 **/*.blg
 **/*.log
 **/*.out
 **/*.synctex.gz
-results/*
-results_paper/*
-results_frozen/*
-writing/*
+
+# Local scratch space and exported documents/archives.
+tmp/
+*.pdf
+*.docx
+*.zip
+
+# Editor and developer-local files.
+.vscode/
+
+# Keep only the smoke tests needed to validate paper regeneration.
 tests/*
-plots/*
+!tests/test_cifar10.py
+!tests/test_regenerate_results_paper.py
+
+# Keep the tracked README; ignore local review drafts and other Markdown notes.
+*.md
+!README.md

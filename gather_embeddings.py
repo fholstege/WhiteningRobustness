@@ -95,6 +95,15 @@ class BackboneSpec:
 
 
 BACKBONES: dict[str, BackboneSpec] = {
+    "resnet50-imagenet": BackboneSpec(
+        key="resnet50-imagenet",
+        model_name="torchvision/ResNet50_Weights.IMAGENET1K_V2",
+        representation="resnet50_imagenet_v2",
+        adapter="torchvision_resnet50",
+        feature_type="global_average_pool_before_fc",
+        per_observation_l2_normalization=False,
+        minimum_transformers_version=(0, 0, 0),
+    ),
     "dinov3-vitb16": BackboneSpec(
         key="dinov3-vitb16",
         model_name="facebook/dinov3-vitb16-pretrain-lvd1689m",
@@ -229,6 +238,76 @@ class ImageDatasetSource:
     source: dict[str, Any]
     source_fingerprint: str
     group_definition: str
+
+
+@dataclass
+class CIFARSplit:
+    dataset: Any
+    indices: np.ndarray
+    y: np.ndarray
+    g: np.ndarray
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def load_batch(self, start: int, end: int) -> list[Any]:
+        return [self.dataset[int(i)][0] for i in self.indices[start:end]]
+
+    def release(self) -> None:
+        self.dataset = None
+
+
+def load_cifar_source(
+    root: str | Path, *, dataset: str, split_seed: int = 0, download: bool = True,
+) -> ImageDatasetSource:
+    """Hold out 10% of official training data; never repartition test data."""
+    from sklearn.model_selection import train_test_split
+    from torchvision.datasets import CIFAR10, CIFAR100
+
+    dataset_class = {"CIFAR10": CIFAR10, "CIFAR100": CIFAR100}[dataset]
+    if split_seed < 0:
+        raise ValueError("CIFAR split seed must be nonnegative.")
+    root = Path(root).expanduser().resolve()
+    train = dataset_class(root=str(root), train=True, download=download)
+    test = dataset_class(root=str(root), train=False, download=download)
+    labels = np.asarray(train.targets, dtype=np.int64)
+    train_indices, val_indices = train_test_split(
+        np.arange(len(labels)), test_size=0.1, stratify=labels,
+        random_state=split_seed,
+    )
+    indices = {
+        "train": np.sort(train_indices), "val": np.sort(val_indices),
+        "test": np.arange(len(test)),
+    }
+    splits = {}
+    for name, selected in indices.items():
+        split_dataset = test if name == "test" else train
+        y = np.asarray(split_dataset.targets, dtype=np.int64)[selected]
+        splits[name] = CIFARSplit(split_dataset, selected, y, y.copy())
+    files = [*train.train_list, *test.test_list, (train.meta["filename"], None)]
+    source = {
+        "format": f"torchvision.datasets.{dataset}", "root": str(root),
+        "split_seed": split_seed, "validation_fraction": 0.1,
+        "split_policy": "stratified_holdout_from_official_train",
+        "test_policy": "official_test_unchanged",
+        "classes": list(train.classes), "spurious_attribute": None,
+        "files_sha256": {
+            filename: sha256_file(root / train.base_folder / filename)
+            for filename, _ in files
+        },
+        # Exact original-row membership makes every cached split auditable.
+        "indices": {name: selected.tolist() for name, selected in indices.items()},
+    }
+    return ImageDatasetSource(
+        dataset=dataset, splits=splits, processor_kwargs={}, source=source,
+        source_fingerprint=_json_fingerprint(source),
+        group_definition="g = y (class reporting only; no spurious attribute)",
+    )
+
+
+def load_cifar10_source(root: str | Path, *, split_seed: int = 0, download: bool = True):
+    """Backward-compatible CIFAR-10 source entry point."""
+    return load_cifar_source(root, dataset="CIFAR10", split_seed=split_seed, download=download)
 
 
 @dataclass
@@ -683,9 +762,16 @@ def load_dataset_source(
     target_column: str,
     spurious_column: str,
     verify_images: bool,
+    cifar10_split_seed: int = 0,
+    download: bool = True,
 ) -> ImageDatasetSource:
     normalized = dataset.strip().lower()
     root = Path(data_root).expanduser().resolve()
+    if normalized in {"cifar10", "cifar100"}:
+        return load_cifar_source(
+            root / normalized.upper(), dataset=normalized.upper(),
+            split_seed=cifar10_split_seed, download=download,
+        )
     if normalized in {"celeba", "celeb_a"}:
         return load_celeba_source(
             root / "CelebA",
@@ -708,7 +794,7 @@ def load_dataset_source(
             metadata_path=metadata_path,
             features_dir=multinli_features_dir,
         )
-    raise ValueError("dataset must be 'celeba', 'waterbirds', or 'multinli'.")
+    raise ValueError("dataset must be 'celeba', 'waterbirds', 'multinli', 'cifar10', or 'cifar100'.")
 
 
 # =============================================================================
@@ -777,6 +863,56 @@ class FrozenImageEncoder(Protocol):
     ) -> np.ndarray: ...
 
     def release_cache(self) -> None: ...
+
+
+class TorchvisionResNet50Encoder:
+    """Pinned ImageNet weights, deterministic preprocessing, and pooled features."""
+
+    def __init__(self, spec, *, device, dtype, local_files_only=False):
+        from torchvision.models import ResNet50_Weights, resnet50
+
+        torch = _require_torch()
+        weights = ResNet50_Weights.IMAGENET1K_V2
+        if spec.model_name != "torchvision/ResNet50_Weights.IMAGENET1K_V2":
+            raise ValueError("This adapter uses pinned ImageNet V2 weights; --model is unsupported.")
+        # Keep large downloaded files inside the project's ignored artifacts.
+        cache = ROOT / "artifacts" / "checkpoints"
+        checkpoint = cache / Path(weights.url).name
+        if local_files_only and not checkpoint.is_file():
+            raise FileNotFoundError(f"Cached ImageNet checkpoint not found: {checkpoint}")
+        state = torch.hub.load_state_dict_from_url(
+            weights.url, model_dir=str(cache), check_hash=True,
+            map_location="cpu", weights_only=True,
+        )
+        self.checkpoint_sha256 = sha256_file(checkpoint)
+        self.model = resnet50(weights=None)
+        self.model.load_state_dict(state, strict=True)
+        self.dimension = self.model.fc.in_features
+        self.model.fc = torch.nn.Identity()
+        self.model.eval().requires_grad_(False).to(device=device, dtype=dtype)
+        self.processor = weights.transforms()
+        self.device, self.dtype, self.torch = device, dtype, torch
+        self.metadata = {
+            "pretraining_dataset": "ImageNet-1K", "task_finetuned": False,
+            "weights": "ResNet50_Weights.IMAGENET1K_V2",
+            "weights_url": weights.url, "checkpoint_sha256": self.checkpoint_sha256,
+            "preprocessing": repr(self.processor),
+            "torch_version": torch.__version__, "torchvision_version": version("torchvision"),
+        }
+
+    def encode(self, images, *, processor_kwargs):
+        if processor_kwargs:
+            raise ValueError("ResNet50 uses its weights' fixed preprocessing.")
+        pixels = self.torch.stack([self.processor(image) for image in images])
+        with self.torch.inference_mode():
+            features = self.model(pixels.to(device=self.device, dtype=self.dtype))
+        return features.float().cpu().numpy()
+
+    def release_cache(self):
+        if self.device.type == "cuda":
+            self.torch.cuda.empty_cache()
+        elif self.device.type == "mps":
+            self.torch.mps.empty_cache()
 
 
 class HuggingFaceClsTokenEncoder:
@@ -1132,6 +1268,7 @@ def load_image_encoder(
     resolved_device = resolve_device(device)
     resolved_dtype = resolve_dtype(dtype, resolved_device)
     factories = {
+        "torchvision_resnet50": TorchvisionResNet50Encoder,
         "huggingface_cls_token": HuggingFaceClsTokenEncoder,
         "huggingface_clip_projection_l2": HuggingFaceClipProjectionEncoder,
     }
@@ -1733,10 +1870,11 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--dataset",
-        choices=("celeba", "waterbirds", "wb", "multinli", "mnli"),
+        choices=("celeba", "waterbirds", "wb", "multinli", "mnli", "cifar10", "cifar100"),
         default="celeba",
     )
     parser.add_argument("--data-root", type=Path, default=DEFAULT_DATA_ROOT)
+    parser.add_argument("--cifar-split-seed", "--cifar10-split-seed", dest="cifar10_split_seed", type=int, default=0)
     parser.add_argument(
         "--artifact-root", type=Path, default=DEFAULT_ARTIFACT_ROOT
     )
@@ -1744,7 +1882,8 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--backbone",
         choices=tuple(sorted(set(BACKBONES) | set(BACKBONE_ALIASES))),
-        default="dinov3-vitb16",
+        default=None,
+        help="Default: resnet50-imagenet for CIFAR-10/100, dinov3-vitb16 otherwise.",
     )
     parser.add_argument(
         "--model",
@@ -1924,7 +2063,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     else:
         spec = resolve_backbone(
-            args.backbone,
+            args.backbone or ("resnet50-imagenet" if args.dataset in {"cifar10", "cifar100"} else "dinov3-vitb16"),
             model_override=args.model,
             representation_override=args.representation,
         )
@@ -1938,6 +2077,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         target_column=args.target_column,
         spurious_column=args.spurious_column,
         verify_images=not args.skip_image_validation,
+        cifar10_split_seed=args.cifar10_split_seed,
+        download=not (args.dry_run or args.local_files_only),
     )
     if args.destination is None:
         destination = (
@@ -2083,7 +2224,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 ),
             }
             if is_multinli
-            else None
+            else getattr(encoder, "metadata", None)
         ),
     )
     print(f"Saved validated embedding bundle: {bundle.root}")

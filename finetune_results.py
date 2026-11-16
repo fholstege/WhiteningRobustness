@@ -82,6 +82,26 @@ FINETUNE_RESULTS_CONFIG: dict[str, Any] = {
     },
     "experiments": [
         {
+            "dataset": "CIFAR10",
+            "embedding": "resnet50",
+            "seeds": [0, 1, 2],
+            "class_balanced": False,
+            "whitening_variants": [
+                {
+                    "whitening_estimator": "ledoit-wolf-nonlinear",
+                    "class_weighted": False,
+                },
+            ],
+        },
+        {
+            # ResNet-50 representations fine-tuned on the 50/50 Waterbirds
+            # training distribution (no label-background correlation).
+            "dataset": "WB_no_spurious",
+            "embedding": "resnet50",
+            "seeds": [1, 2, 3, 4, 5],
+            "class_balanced": True,
+        },
+        {
             "dataset": "WB",
             "embedding": "resnet50",
             "seeds": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
